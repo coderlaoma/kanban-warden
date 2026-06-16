@@ -1,8 +1,10 @@
 """Kanban Warden Hermes plugin.
 
-The plugin registers lightweight guard hooks around Kanban coordination tools.
-It never blocks writes: it appends actionable warnings to tool results so the
-agent can correct leaked values before the task state becomes durable.
+The plugin registers lightweight guard hooks around Kanban coordination tools and,
+when enabled from profile config, starts a background supervisor loop tied to the
+profile/gateway lifecycle. It never blocks writes: it appends actionable warnings
+to tool results so the agent can correct leaked values before the task state
+becomes durable.
 """
 
 from __future__ import annotations
@@ -12,11 +14,14 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from .config import KanbanWardenConfig
+from .supervisor import WardenSupervisor
 from .warden import ScanFinding, build_warning_text, default_scanner
 
 LOGGER = logging.getLogger(__name__)
 _KANBAN_TOOLS = {"kanban_comment", "kanban_complete", "kanban_block"}
 _TEXT_FIELDS = ("body", "summary", "result", "reason")
+_SUPERVISOR: WardenSupervisor | None = None
 
 
 def _extract_text(args: Mapping[str, Any]) -> str:
@@ -81,6 +86,47 @@ def _transform_tool_result(
 
 
 def register(ctx: Any) -> None:
-    """Register Kanban safety hooks with Hermes."""
+    """Register Kanban safety hooks and optional supervisor with Hermes."""
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("transform_tool_result", _transform_tool_result)
+    _start_supervisor_if_enabled(ctx)
+
+
+def unregister(_ctx: Any = None) -> None:
+    """Stop the supervisor when Hermes/plugin manager supports unload hooks."""
+    global _SUPERVISOR
+    if _SUPERVISOR is not None:
+        _SUPERVISOR.stop()
+        _SUPERVISOR = None
+
+
+def _start_supervisor_if_enabled(ctx: Any) -> None:
+    global _SUPERVISOR
+    config = KanbanWardenConfig.from_mapping(_context_config(ctx))
+    if not config.enabled:
+        LOGGER.info("kanban-warden loaded; supervisor disabled")
+        return
+    profile_name = _profile_name(ctx)
+    _SUPERVISOR = WardenSupervisor(config, profile_name=profile_name)
+    _SUPERVISOR.start()
+
+
+def _context_config(ctx: Any) -> Mapping[str, Any]:
+    for attr in ("config", "profile_config", "settings"):
+        value = getattr(ctx, attr, None)
+        if isinstance(value, Mapping):
+            return value
+    get_config = getattr(ctx, "get_config", None)
+    if callable(get_config):
+        value = get_config()
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _profile_name(ctx: Any) -> str | None:
+    for attr in ("profile", "profile_name"):
+        value = getattr(ctx, attr, None)
+        if isinstance(value, str):
+            return value
+    return None

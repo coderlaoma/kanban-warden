@@ -34,6 +34,9 @@ dev = [
 [project.entry-points."hermes_agent.plugins"]
 kanban-warden = "kanban_warden"
 
+[project.scripts]
+kanban-warden = "kanban_warden.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from kanban_warden import _transform_tool_result
+from kanban_warden.cli import main
+from kanban_warden.config import KanbanWardenConfig
+from kanban_warden.lock import LeaderLock
+from kanban_warden.supervisor import WardenSupervisor, demo_lock_contention
 from kanban_warden.warden import build_warning_text, default_scanner
 
-FAKE_GITHUB_TOKEN = "ghp_" + "a" * 30
+FAKE_GITHUB_TOKEN = "ghp_" + "a" * 36
 FAKE_OPENAI_KEY = "sk-" + "b" * 30
 
 
@@ -23,7 +29,7 @@ def test_scanner_ignores_redacted_values() -> None:
 
 
 def test_database_url_with_credentials_is_detected() -> None:
-    findings = default_scanner().scan("postgres://user:***@example.internal:5432/app")
+    findings = default_scanner().scan("postgres://user:pw@example.internal:5432/app")
 
     assert [finding.rule_id for finding in findings] == ["database-url"]
 
@@ -60,3 +66,73 @@ def test_transform_tool_result_ignores_non_kanban_tools() -> None:
     )
 
     assert result == "ok"
+
+
+def test_config_loads_required_profile_keys() -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {
+            "kanban_warden": {
+                "enabled": "true",
+                "boards": "*",
+                "leader_lock": {"enabled": True, "lease_seconds": 45, "heartbeat_seconds": 10},
+                "loop": {"event_interval_seconds": 2, "health_sweep_seconds": 30},
+                "notifications": {"enabled": True, "channels": ["origin"]},
+                "auto_advance": {"enabled": False, "dry_run": True},
+                "limits": {
+                    "max_retries": 3,
+                    "task_timeout_seconds": 600,
+                    "stale_claim_seconds": 120,
+                },
+            }
+        }
+    )
+
+    assert config.enabled is True
+    assert config.boards == "*"
+    assert config.leader_lock.lease_seconds == 45
+    assert config.loop.event_interval_seconds == 2
+    assert config.notifications.channels == ["origin"]
+    assert config.limits.max_retries == 3
+
+
+def test_leader_lock_allows_only_one_active_owner(tmp_path: Path) -> None:
+    db_path = tmp_path / "leader.db"
+    first = LeaderLock(db_path, owner="profile-a")
+    second = LeaderLock(db_path, owner="profile-b")
+
+    assert first.acquire(lease_seconds=60, now=1000) is True
+    assert second.acquire(lease_seconds=60, now=1001) is False
+    assert first.heartbeat(lease_seconds=60, now=1002) is True
+    assert second.acquire(lease_seconds=60, now=1061) is False
+    assert second.acquire(lease_seconds=60, now=1063) is True
+
+
+def test_supervisor_dry_tick_acquires_leader_lock(tmp_path: Path) -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {
+            "enabled": True,
+            "leader_lock": {"db_path": str(tmp_path / "leader.db"), "lease_seconds": 60},
+            "loop": {"health_sweep_seconds": 0},
+        }
+    )
+    supervisor = WardenSupervisor(config, profile_name="tester")
+
+    assert supervisor.tick() is True
+    status = supervisor.status()
+    assert status["leader_lock"]["active"] is True
+    assert status["leader_lock"]["owner"] == "tester:" + str(__import__("os").getpid())
+
+
+def test_demo_lock_contention() -> None:
+    result = demo_lock_contention()
+
+    assert result["first_acquired"] is True
+    assert result["second_acquired"] is False
+    assert result["active_owner"] == "demo-profile-a"
+
+
+def test_cli_demo_lock(capsys) -> None:  # type: ignore[no-untyped-def]
+    assert main(["demo-lock"]) == 0
+    out = capsys.readouterr().out
+    assert "first_acquired" in out
+    assert "second_acquired" in out
