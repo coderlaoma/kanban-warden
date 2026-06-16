@@ -1,15 +1,26 @@
-# Kanban Warden
+# hermes-kanban-warden
 
-Kanban Warden is a Hermes Agent plugin for Kanban workers. It provides two low-intrusion safety layers:
+hermes-kanban-warden is a Hermes Agent plugin for Kanban workers. It provides two low-intrusion safety layers:
 
 1. hook-based scanning of durable Kanban output (`kanban_comment`, `kanban_complete`, `kanban_block`) for likely secrets; and
 2. an optional profile-scoped background supervisor loop that runs with the Hermes profile/gateway lifecycle, not Hermes cron.
 
 The first implementation is intentionally conservative: it warns and logs with redacted snippets instead of blocking tool calls or mutating the Kanban database.
 
+## Naming map
+
+This project uses `hermes-kanban-warden` as the human-facing project/display name. The existing technical slugs remain unchanged in this documentation-only update:
+
+- Project/display name: `hermes-kanban-warden`
+- GitHub repository slug: `coderlaoma/kanban-warden`
+- Python import/config namespace: `kanban_warden`
+- Python distribution / Hermes plugin entry point / CLI slug: `kanban-warden`
+
+Keep these names distinct when documenting or changing the project. Do not rename the repository, package distribution, plugin entry point, CLI command, runtime log prefix, database path, or Python namespace unless a future migration task explicitly scopes that breaking change.
+
 ## What it checks
 
-Kanban Warden scans user-visible text fields such as `body`, `summary`, `result`, `reason`, and JSON-serialized `metadata`.
+hermes-kanban-warden scans user-visible text fields such as `body`, `summary`, `result`, `reason`, and JSON-serialized `metadata`.
 
 Packaged rules detect common high-risk patterns, including:
 
@@ -121,4 +132,4 @@ python -m build
 
 ## Security posture
 
-Kanban Warden never returns raw matched secrets. Findings include only rule id, severity, location, and a redacted snippet. The scanner is conservative and may produce false positives; warnings should be treated as prompts to review and redact durable Kanban output.
+hermes-kanban-warden never returns raw matched secrets. Findings include only rule id, severity, location, and a redacted snippet. The scanner is conservative and may produce false positives; warnings should be treated as prompts to review and redact durable Kanban output.

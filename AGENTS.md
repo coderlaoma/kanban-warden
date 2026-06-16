@@ -4,12 +4,23 @@ Guidance for generic AI coding agents working in this repository.
 
 ## Project background and mission
 
-`kanban-warden` is a Hermes Agent plugin for safer Kanban worker output. The current implementation has two layers:
+`hermes-kanban-warden` is the human-facing display name for this Hermes Agent plugin for safer Kanban worker output. The current implementation has two layers:
 
 1. hook-based scanning of durable Kanban output (`kanban_comment`, `kanban_complete`, and `kanban_block`) for likely secrets or unsafe connection details; and
 2. an optional profile-scoped supervisor skeleton that runs from the Hermes plugin lifecycle and can also be exercised through the `kanban-warden` debug CLI.
 
 The project is still intentionally conservative. It warns and logs with redacted snippets instead of blocking tool calls, changing user data, or mutating the Kanban database. The supervisor/config/leader-lock/CLI skeleton exists, but operational board automation remains placeholder or dry-run until dedicated code and tests are added.
+
+## Naming map
+
+Use these names consistently:
+
+- Project/display name: `hermes-kanban-warden`
+- GitHub repository slug: `coderlaoma/kanban-warden`
+- Python import/config namespace: `kanban_warden`
+- Python distribution / Hermes plugin entry point / CLI slug: `kanban-warden`
+
+`kanban-warden` remains the current repo/package/CLI/plugin technical slug for this documentation-only update. Do not rename `pyproject.toml` package metadata, `src/kanban_warden/plugin.yaml`, CLI commands, runtime log prefixes, database paths, or Python imports unless a future task explicitly scopes a breaking slug migration with aliases and compatibility notes.
 
 ## Current implementation scope
 
