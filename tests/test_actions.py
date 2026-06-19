@@ -435,6 +435,190 @@ def test_review_needs_changes_uses_configured_implementer_fallback_not_reviewer(
     assert followup == ("hairou", "ready")
 
 
+def test_manual_review_needs_changes_identifies_source_from_body_and_dispatches_fix_card(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(
+        con,
+        "t_041385e0",
+        title="Original implementation",
+        status="blocked",
+        assignee="mabu",
+        created_at=1,
+    )
+    _insert_real_task(
+        con,
+        "t_e0b9905c",
+        title="Manual reviewer follow-up",
+        status="done",
+        assignee="reviewer",
+        created_at=2,
+    )
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("t_041385e0", "telegram", "chat-1", "thread-1", "user-1", "mabu", 3, 0),
+    )
+    con.commit()
+    con.close()
+    review_body = (
+        "Manual reviewer result: NEEDS-CHANGES. Source task t_041385e0 still needs "
+        "a focused regression test before this can be accepted."
+    )
+    _event(
+        board,
+        "t_e0b9905c",
+        "completed",
+        {"verdict": "NEEDS-CHANGES", "body": review_body},
+        4,
+    )
+
+    supervisor = WardenSupervisor(config, profile_name="tester")
+    first = supervisor.collect(now=20)
+    second = supervisor.collect(now=21)
+
+    assert any(
+        action["kind"] == "create_implementer_followup"
+        and action["task_id"] == "t_041385e0"
+        for action in first["planned_actions"]
+    )
+    con = sqlite3.connect(board)
+    followup_id = "fix_t_041385e0_t_e0b9905c"
+    followup = con.execute(
+        "select title, body, status, assignee, created_by, idempotency_key from tasks where id = ?",
+        (followup_id,),
+    ).fetchone()
+    assert followup is not None
+    assert followup[0] == "Fix review changes for t_041385e0"
+    assert review_body in followup[1]
+    assert followup[2] == "ready"
+    assert followup[3] == "mabu"
+    assert followup[4] == "kanban-warden"
+    assert followup[5] == "implementer-followup:default:t_e0b9905c:t_041385e0"
+    assert con.execute(
+        "select count(*) from task_links where parent_id = ? and child_id = ?",
+        ("t_041385e0", followup_id),
+    ).fetchone()[0] == 1
+    assert con.execute(
+        "select platform, chat_id, thread_id, notifier_profile, last_event_id from kanban_notify_subs where task_id = ?",
+        (followup_id,),
+    ).fetchone() == ("telegram", "chat-1", "thread-1", "mabu", 2)
+    assert con.execute(
+        "select count(*) from task_events where task_id = ? and kind = ?", (followup_id, "created")
+    ).fetchone()[0] == 1
+    assert not any(
+        result["applied"] and result["kind"] == "create_implementer_followup"
+        for result in second["action_results"]
+    )
+    assert con.execute("select count(*) from tasks where id = ?", (followup_id,)).fetchone()[0] == 1
+
+
+def test_manual_review_needs_changes_without_clear_source_context_creates_no_fix_card(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False, implementer_assignee="mabu")
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(
+        con,
+        "t_e0b9905c",
+        title="Manual reviewer follow-up",
+        status="done",
+        assignee="reviewer",
+        created_at=1,
+    )
+    con.commit()
+    con.close()
+    _event(
+        board,
+        "t_e0b9905c",
+        "completed",
+        {
+            "verdict": "NEEDS-CHANGES",
+            "body": "Needs changes, but mentions t_11111111 and t_22222222 without naming a source task.",
+        },
+        2,
+    )
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert not any(action["kind"] == "create_implementer_followup" for action in report["planned_actions"])
+    con = sqlite3.connect(board)
+    assert con.execute("select count(*) from tasks where id like 'fix_%'").fetchone()[0] == 0
+
+
+def test_generated_fix_followup_needs_changes_does_not_create_nested_fix_card(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False, implementer_assignee="mabu")
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(
+        con,
+        "t_041385e0",
+        title="Original implementation",
+        status="blocked",
+        assignee="mabu",
+        created_at=1,
+    )
+    _insert_real_task(
+        con,
+        "fix_t_041385e0_t_e0b9905c",
+        title="Fix review changes for t_041385e0",
+        status="done",
+        assignee="mabu",
+        created_at=2,
+    )
+    con.execute(
+        "insert into task_links(parent_id, child_id) values (?, ?)",
+        ("t_041385e0", "fix_t_041385e0_t_e0b9905c"),
+    )
+    con.commit()
+    con.close()
+    generated_body = (
+        "Follow-up implementation for review t_e0b9905c on source task t_041385e0.\n\n"
+        "Review request:\nNEEDS-CHANGES: add the requested regression."
+    )
+    _event(
+        board,
+        "fix_t_041385e0_t_e0b9905c",
+        "completed",
+        {"body": generated_body, "summary": "NEEDS-CHANGES still failing"},
+        3,
+    )
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert not any(
+        action["kind"] == "create_implementer_followup" for action in report["planned_actions"]
+    )
+    con = sqlite3.connect(board)
+    assert (
+        con.execute("select count(*) from tasks where id like 'fix_t_041385e0_fix_%'").fetchone()[0]
+        == 0
+    )
+
+
 def test_stale_running_retry_budget_escalates_after_retries(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False, max_retries=1)
     board = Path(config.hermes_home or "") / "kanban.db"

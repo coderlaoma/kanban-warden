@@ -8,6 +8,7 @@ small Kanban state transitions through SQLite when auto-advance is enabled.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from dataclasses import asdict, dataclass, field
@@ -248,7 +249,7 @@ class KanbanActionEngine:
             )
 
         verdict = _review_verdict(event)
-        source_task = _review_source_task(event)
+        source_task = None if _is_generated_followup_review_event(event, payload) else _review_source_task(event)
         if verdict == "approve" and source_task:
             actions.append(
                 self._comment(
@@ -1063,14 +1064,53 @@ def _review_verdict(event: BoardEvent) -> str | None:
     return None
 
 
+def _generated_followup_text(payload: dict[str, Any]) -> str:
+    return "\n".join(
+        _text(payload.get(key))
+        for key in ("body", "comment", "comments", "context", "summary", "result", "reason")
+    )
+
+
+def _is_generated_followup_review_event(event: BoardEvent, payload: dict[str, Any]) -> bool:
+    task_id = event.task_id or ""
+    if task_id.startswith("fix_") or task_id.startswith("review_fix_"):
+        return True
+    text = _generated_followup_text(payload).lower()
+    return bool(
+        re.search(r"\bfollow-up implementation for review\b.+\bon source task\b", text, re.DOTALL)
+    )
+
+
 def _review_source_task(event: BoardEvent) -> str | None:
     payload = event.payload or {}
+    if _is_generated_followup_review_event(event, payload):
+        return None
     for key in ("source_task", "source_task_id", "implementation_task", "reviewed_task"):
         value = _text(payload.get(key))
         if value:
             return value
+    explicit_source = _review_source_task_from_text(payload)
+    if explicit_source:
+        return explicit_source
     if event.relationship.parents:
         return event.relationship.parents[0]
+    return None
+
+
+def _review_source_task_from_text(payload: dict[str, Any]) -> str | None:
+    text = _generated_followup_text(payload)
+    if not text:
+        return None
+    # Manual reviewer follow-up cards may only mention the original card in prose,
+    # e.g. "Source task t_041385e0".  Require the source/implementation/reviewed
+    # cue immediately before the id so arbitrary task mentions stay ambiguous.
+    match = re.search(
+        r"\b(?:source|implementation|implemented|reviewed)\s+(?:task|card)?\s*[:#-]?\s*(t_[A-Za-z0-9_-]+)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1)
     return None
 
 
