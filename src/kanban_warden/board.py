@@ -197,6 +197,31 @@ def analyze_health(
                         }
                     )
         if _has_table(con, "task_links") and _has_table(con, "tasks"):
+            dependency_rows = _safe_select(
+                con,
+                """
+                select child.id as child_id, child.status as child_status,
+                       parent.id as parent_id, parent.status as parent_status
+                from task_links l
+                join tasks child on child.id = l.child_id
+                join tasks parent on parent.id = l.parent_id
+                where coalesce(child.status, '') in ('todo', 'ready', 'blocked')
+                  and coalesce(parent.status, '') in ('blocked', 'gave_up', 'failed')
+                """,
+            )
+            for row in dependency_rows:
+                findings.append(
+                    {
+                        "board": board_name,
+                        "task_id": _row_text(row, "child_id"),
+                        "kind": "dependency_blocked_by_stuck_parent",
+                        "parent_id": _row_text(row, "parent_id"),
+                        "child_status": _row_text(row, "child_status"),
+                        "parent_status": _row_text(row, "parent_status"),
+                        "candidate_action": "surface_dependency_blocker_to_operator",
+                    }
+                )
+
             root_rows = _safe_select(
                 con,
                 """

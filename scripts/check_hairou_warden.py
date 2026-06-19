@@ -51,8 +51,12 @@ def main(argv: list[str] | None = None) -> int:
     plugins_enabled = _plugins_enabled(data)
     warden = data.get("kanban_warden") if isinstance(data.get("kanban_warden"), dict) else {}
     enabled = _as_bool(warden.get("enabled", False))
-    auto_advance = warden.get("auto_advance") if isinstance(warden.get("auto_advance"), dict) else {}
-    notifications = warden.get("notifications") if isinstance(warden.get("notifications"), dict) else {}
+    auto_advance = (
+        warden.get("auto_advance") if isinstance(warden.get("auto_advance"), dict) else {}
+    )
+    notifications = (
+        warden.get("notifications") if isinstance(warden.get("notifications"), dict) else {}
+    )
     leader_lock = warden.get("leader_lock") if isinstance(warden.get("leader_lock"), dict) else {}
 
     report: dict[str, Any] = {
@@ -67,7 +71,9 @@ def main(argv: list[str] | None = None) -> int:
         "notification_channel_count": len(notifications.get("channels", []) or []),
         "auto_advance_enabled": _as_bool(auto_advance.get("enabled", False)),
         "auto_advance_dry_run": _as_bool(auto_advance.get("dry_run", True)),
-        "hermes_home_hint": str(args.hermes_home) if args.hermes_home else str(warden.get("hermes_home") or "default"),
+        "hermes_home_hint": str(args.hermes_home)
+        if args.hermes_home
+        else str(warden.get("hermes_home") or "default"),
         "expected_startup_logs": [
             "kanban-warden loaded; supervisor enabled profile=<profile>",
             "kanban-warden supervisor thread started profile=<profile>",
@@ -80,13 +86,21 @@ def main(argv: list[str] | None = None) -> int:
         warnings.append("plugins.enabled does not include kanban-warden")
     if not enabled:
         warnings.append("kanban_warden.enabled is false; supervisor will not start")
-    if _as_bool(auto_advance.get("enabled", False)) and not _as_bool(auto_advance.get("dry_run", True)):
-        warnings.append("auto_advance can mutate Kanban boards because enabled=true and dry_run=false")
+    if _as_bool(auto_advance.get("enabled", False)) and not _as_bool(
+        auto_advance.get("dry_run", True)
+    ):
+        warnings.append(
+            "auto_advance can mutate Kanban boards because enabled=true and dry_run=false"
+        )
 
     if not args.skip_dry_run:
-        cli = _run(["kanban-warden", "--config", str(args.config), "--profile", args.profile, "status"])
+        cli = _run(
+            ["kanban-warden", "--config", str(args.config), "--profile", args.profile, "status"]
+        )
         report["status_command"] = _safe_command_summary(cli)
-        dry = _run(["kanban-warden", "--config", str(args.config), "--profile", args.profile, "dry-run"])
+        dry = _run(
+            ["kanban-warden", "--config", str(args.config), "--profile", args.profile, "dry-run"]
+        )
         report["dry_run_command"] = _safe_command_summary(dry)
 
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -118,10 +132,16 @@ def _safe_command_summary(result: subprocess.CompletedProcess[str]) -> dict[str,
         if isinstance(status, dict):
             summary["enabled"] = status.get("enabled")
             summary["profile"] = status.get("profile")
-            leader_lock = status.get("leader_lock") if isinstance(status.get("leader_lock"), dict) else {}
-            summary["leader_lock_active"] = leader_lock.get("active") if isinstance(leader_lock, dict) else None
+            leader_lock = (
+                status.get("leader_lock") if isinstance(status.get("leader_lock"), dict) else {}
+            )
+            summary["leader_lock_active"] = (
+                leader_lock.get("active") if isinstance(leader_lock, dict) else None
+            )
             state = status.get("state") if isinstance(status.get("state"), dict) else {}
-            summary["state_keys"] = sorted(str(key) for key in state) if isinstance(state, dict) else []
+            summary["state_keys"] = (
+                sorted(str(key) for key in state) if isinstance(state, dict) else []
+            )
         dry = parsed.get("dry_run") if isinstance(parsed.get("dry_run"), dict) else None
         if isinstance(dry, dict):
             summary["dry_run_board_count"] = len(dry.get("boards", []) or [])

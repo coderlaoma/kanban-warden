@@ -128,7 +128,8 @@ class WardenSupervisor:
             event_actions = self.action_engine.plan_for_events(events)
             planned_actions.extend(action.to_dict() for action in event_actions)
             action_results.extend(
-                result.to_dict() for result in self.action_engine.apply(board.db_path, event_actions)
+                result.to_dict()
+                for result in self.action_engine.apply(board.db_path, event_actions)
             )
             board_health = analyze_health(
                 board.name,
@@ -141,7 +142,8 @@ class WardenSupervisor:
             health_actions = self.action_engine.plan_for_health(board_health)
             planned_actions.extend(action.to_dict() for action in health_actions)
             action_results.extend(
-                result.to_dict() for result in self.action_engine.apply(board.db_path, health_actions)
+                result.to_dict()
+                for result in self.action_engine.apply(board.db_path, health_actions)
             )
         report = {
             "profile": self.profile_name,

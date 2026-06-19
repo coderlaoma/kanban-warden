@@ -189,7 +189,8 @@ Do not manually subscribe every decomposed child task as the normal operating mo
 - `BoardEvent` summaries include relationship metadata, including parents, children, `root_task_id`, `review_required`, and comment count.
 - The supervisor tails child events, preserves per-board cursors, and feeds the notification/action state machine from those events.
 - Notification decisions are idempotent and queued in the warden state DB outbox when notifications are enabled.
-- Health sweeps detect root/child coordination problems such as a root task not being closed after all children are done.
+- Health sweeps detect root/child coordination problems such as a root task not being closed after all children are done, or a child that cannot proceed because an upstream dependency is blocked/failed.
+- When a blocked/gave-up/worker-failure child or dependency deadlock is detected, the fallback `ensure_subscription` action copies an existing root subscription to the stuck child (and ensures the root has the same subscription) using `insert or ignore`. This keeps normal entry creation root-only while allowing the native notifier to route the stuck child back to the user during incidents.
 
 Manual child-task subscription is reserved for explicit operator requests, debugging, or temporary recovery when the normal warden/notification path is unavailable. Remove temporary child subscriptions after the incident so routine decomposed traffic continues to flow through the root-only entry policy.
 

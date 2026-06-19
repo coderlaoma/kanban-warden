@@ -98,7 +98,6 @@ def test_config_loads_required_profile_keys() -> None:
     assert config.limits.max_retries == 3
 
 
-
 def test_plugin_context_config_falls_back_to_hermes_profile_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     hermes_config = {
         "kanban_warden": {
@@ -167,7 +166,6 @@ def test_register_starts_supervisor_from_hermes_profile_config(monkeypatch) -> N
         "started": True,
     }
     monkeypatch.setattr(kanban_warden, "_SUPERVISOR", None)
-
 
 
 def test_config_boolean_string_false_values_are_false() -> None:

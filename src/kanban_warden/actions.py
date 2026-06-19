@@ -19,6 +19,7 @@ from .config import KanbanWardenConfig
 from .state import WardenStateStore
 
 ActionKind = Literal[
+    "ensure_subscription",
     "notify",
     "create_reviewer",
     "comment",
@@ -103,7 +104,21 @@ class KanbanActionEngine:
                         payload=finding,
                     )
                 )
-            elif kind in {"long_term_blocked", "review_approved_but_still_blocked", "root_not_closed_after_children_done"}:
+            elif kind in {
+                "long_term_blocked",
+                "review_approved_but_still_blocked",
+                "root_not_closed_after_children_done",
+                "dependency_blocked_by_stuck_parent",
+            }:
+                actions.append(
+                    self._ensure_subscription(
+                        board_name,
+                        task_id,
+                        f"health:{board_name}:{task_id}:{kind}:ensure-subscription",
+                        f"ensure root/stuck-task subscriptions for health finding: {kind}",
+                        payload=finding,
+                    )
+                )
                 actions.append(
                     self._notify(
                         board_name,
@@ -129,6 +144,10 @@ class KanbanActionEngine:
             except Exception as exc:  # pragma: no cover - defensive runtime safety
                 self.state_store.mark_action_failed(action.idempotency_key, str(exc))
                 raise
+            if _retryable_no_effect(action, note):
+                self.state_store.mark_action_failed(action.idempotency_key, note)
+                results.append(ActionResult(action, applied=False, skipped=True, note=note))
+                continue
             self.state_store.mark_action_done(action.idempotency_key, note)
             results.append(ActionResult(action, applied=True, note=note))
         return results
@@ -144,6 +163,17 @@ class KanbanActionEngine:
         reason = _text(payload.get("reason"))
         outcome = _text(payload.get("outcome")) or _text(payload.get("verdict"))
         status = event.task_status or ""
+
+        if self._should_ensure_subscription_event(kind, status, reason, outcome):
+            actions.append(
+                self._ensure_subscription(
+                    event.board_name,
+                    task_id,
+                    f"{event_key}:ensure-subscription:{_slug(kind, status, reason, outcome)}",
+                    f"ensure root/stuck-task subscriptions for kanban event {kind} status={status or 'unknown'}",
+                    payload=event.summary(),
+                )
+            )
 
         if self._should_notify_event(kind, status, reason, outcome):
             actions.append(
@@ -166,7 +196,10 @@ class KanbanActionEngine:
                     idempotency_key=f"reviewer:{event.board_name}:{task_id}",
                     reason="review-required blocked implementation card",
                     message=f"Create/dispatch reviewer for {task_id}",
-                    payload={"source_event": event.summary(), "assignee": self.config.auto_advance.reviewer_assignee},
+                    payload={
+                        "source_event": event.summary(),
+                        "assignee": self.config.auto_advance.reviewer_assignee,
+                    },
                     max_attempts=self.config.limits.max_retries,
                     dry_run=self.config.auto_advance.dry_run,
                 )
@@ -176,17 +209,37 @@ class KanbanActionEngine:
         source_task = _review_source_task(event)
         if verdict == "approve" and source_task:
             actions.append(
-                self._comment(event.board_name, source_task, f"review-approve:{event.board_name}:{task_id}:{source_task}", f"[warden-review-approved] reviewer {task_id} approved; unblock downstream work.")
+                self._comment(
+                    event.board_name,
+                    source_task,
+                    f"review-approve:{event.board_name}:{task_id}:{source_task}",
+                    f"[warden-review-approved] reviewer {task_id} approved; unblock downstream work.",
+                )
             )
             actions.append(
-                self._unblock(event.board_name, source_task, f"review-approve-unblock:{event.board_name}:{task_id}:{source_task}", "review approve")
+                self._unblock(
+                    event.board_name,
+                    source_task,
+                    f"review-approve-unblock:{event.board_name}:{task_id}:{source_task}",
+                    "review approve",
+                )
             )
         elif verdict == "needs-changes" and source_task:
             actions.append(
-                self._comment(event.board_name, source_task, f"review-needs-changes:{event.board_name}:{task_id}:{source_task}", f"[warden-review-needs-changes] reviewer {task_id} requested changes; implementation card is unblocked for follow-up.")
+                self._comment(
+                    event.board_name,
+                    source_task,
+                    f"review-needs-changes:{event.board_name}:{task_id}:{source_task}",
+                    f"[warden-review-needs-changes] reviewer {task_id} requested changes; implementation card is unblocked for follow-up.",
+                )
             )
             actions.append(
-                self._unblock(event.board_name, source_task, f"review-needs-changes-unblock:{event.board_name}:{task_id}:{source_task}", "review needs changes")
+                self._unblock(
+                    event.board_name,
+                    source_task,
+                    f"review-needs-changes-unblock:{event.board_name}:{task_id}:{source_task}",
+                    "review needs changes",
+                )
             )
 
         if _is_worker_failure(kind, status, reason, outcome):
@@ -245,7 +298,24 @@ class KanbanActionEngine:
             )
         ]
 
-    def _notify(self, board_name: str, task_id: str, key: str, reason: str, *, payload: dict[str, Any]) -> PlannedAction:
+    def _ensure_subscription(
+        self, board_name: str, task_id: str, key: str, reason: str, *, payload: dict[str, Any]
+    ) -> PlannedAction:
+        return PlannedAction(
+            kind="ensure_subscription",
+            board_name=board_name,
+            task_id=task_id,
+            target_task_id=task_id,
+            idempotency_key=key,
+            reason=reason,
+            message=f"Ensure root/stuck-task subscriptions: {reason} task={task_id}",
+            payload=payload,
+            dry_run=self.config.auto_advance.dry_run,
+        )
+
+    def _notify(
+        self, board_name: str, task_id: str, key: str, reason: str, *, payload: dict[str, Any]
+    ) -> PlannedAction:
         return PlannedAction(
             kind="notify",
             board_name=board_name,
@@ -258,10 +328,37 @@ class KanbanActionEngine:
         )
 
     def _comment(self, board_name: str, task_id: str, key: str, message: str) -> PlannedAction:
-        return PlannedAction("comment", board_name, task_id, key, "review follow-up", message, task_id, {}, dry_run=self.config.auto_advance.dry_run)
+        return PlannedAction(
+            "comment",
+            board_name,
+            task_id,
+            key,
+            "review follow-up",
+            message,
+            task_id,
+            {},
+            dry_run=self.config.auto_advance.dry_run,
+        )
 
     def _unblock(self, board_name: str, task_id: str, key: str, reason: str) -> PlannedAction:
-        return PlannedAction("unblock", board_name, task_id, key, reason, f"Unblock {task_id}: {reason}", task_id, {}, dry_run=self.config.auto_advance.dry_run)
+        return PlannedAction(
+            "unblock",
+            board_name,
+            task_id,
+            key,
+            reason,
+            f"Unblock {task_id}: {reason}",
+            task_id,
+            {},
+            dry_run=self.config.auto_advance.dry_run,
+        )
+
+    def _should_ensure_subscription_event(
+        self, kind: str, status: str, reason: str, outcome: str
+    ) -> bool:
+        if not self.config.notifications.enabled:
+            return False
+        return kind in {"blocked", "gave_up"} or _is_worker_failure(kind, status, reason, outcome)
 
     def _should_notify_event(self, kind: str, status: str, reason: str, outcome: str) -> bool:
         if not self.config.notifications.enabled:
@@ -275,6 +372,8 @@ class KanbanActionEngine:
         return _is_worker_failure(kind, status, reason, outcome)
 
     def _apply_one(self, db_path: Path, action: PlannedAction) -> str:
+        if action.kind == "ensure_subscription":
+            return self._ensure_related_subscriptions(db_path, action)
         if action.kind == "notify":
             self.state_store.enqueue_notification(action.idempotency_key, action.to_dict())
             return "queued-notification"
@@ -283,12 +382,104 @@ class KanbanActionEngine:
         if action.kind == "comment":
             return self._insert_comment(db_path, action)
         if action.kind in {"unblock", "retry"}:
-            self.state_store.bump_retry(action.board_name, action.target_task_id or action.task_id or "", _text(action.payload.get("recovery_kind")) or action.kind)
+            self.state_store.bump_retry(
+                action.board_name,
+                action.target_task_id or action.task_id or "",
+                _text(action.payload.get("recovery_kind")) or action.kind,
+            )
             return self._unblock_task(db_path, action)
         if action.kind == "escalate":
             self.state_store.enqueue_notification(action.idempotency_key, action.to_dict())
             return self._insert_comment(db_path, action)
         return "noop"
+
+    def _ensure_related_subscriptions(self, db_path: Path, action: PlannedAction) -> str:
+        """Copy existing Kanban notify subscriptions between a stuck task and its root.
+
+        Gateway entry keeps the normal policy of subscribing only the root card. When a
+        decomposed child gets blocked or a worker gives up, this fallback makes the
+        root and the stuck child both observable by the native Kanban notifier without
+        requiring the entrypoint to subscribe every child up front. It is best-effort:
+        if no related subscription exists, the warden records that fact and relies on
+        the queued notification/outbox plus logs for operator visibility.
+        """
+        task_id = action.target_task_id or action.task_id
+        if not task_id:
+            return "missing-task"
+        with sqlite3.connect(db_path) as con:
+            if not _table_exists(con, "kanban_notify_subs"):
+                return "notify-subs-table-missing"
+            related = _related_subscription_tasks(con, task_id)
+            if not related:
+                return "task-missing"
+            placeholders = ",".join("?" for _ in related)
+            rows = con.execute(
+                f"""
+                select task_id, platform, chat_id, thread_id, user_id, notifier_profile, last_event_id
+                from kanban_notify_subs
+                where task_id in ({placeholders})
+                order by case when task_id = ? then 0 else 1 end, created_at
+                """,
+                (*related, related[0]),
+            ).fetchall()
+            if not rows:
+                return "no-related-subscription-source"
+            now = int(time.time())
+            source_cursor = _subscription_replay_cursor(con, rows, action.payload)
+            inserted = 0
+            for target_id in related:
+                target_cursor = _target_subscription_cursor(
+                    con, target_id, action.payload, source_cursor
+                )
+                for row in rows:
+                    before = con.total_changes
+                    con.execute(
+                        """
+                        insert or ignore into kanban_notify_subs(
+                          task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id
+                        ) values (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            target_id,
+                            row[1],
+                            row[2],
+                            row[3] or "",
+                            row[4],
+                            row[5],
+                            now,
+                            target_cursor,
+                        ),
+                    )
+                    changed = con.total_changes - before
+                    inserted += changed
+                    if not changed:
+                        con.execute(
+                            """
+                            update kanban_notify_subs
+                            set last_event_id = ?
+                            where task_id = ?
+                              and platform = ?
+                              and chat_id = ?
+                              and thread_id = ?
+                              and last_event_id < ?
+                            """,
+                            (target_cursor, target_id, row[1], row[2], row[3] or "", target_cursor),
+                        )
+            if inserted:
+                _insert_event(
+                    con,
+                    task_id,
+                    "commented",
+                    {
+                        "by": "kanban-warden",
+                        "idempotency_key": action.idempotency_key,
+                        "note": "ensured root/stuck-task notify subscriptions",
+                        "related_tasks": related,
+                        "inserted": inserted,
+                    },
+                    now,
+                )
+            return f"ensured-subscriptions inserted={inserted} related={','.join(related)}"
 
     def _create_reviewer(self, db_path: Path, action: PlannedAction) -> str:
         source_task = action.task_id
@@ -310,7 +501,17 @@ class KanbanActionEngine:
                     "insert or ignore into task_links(parent_id, child_id) values (?, ?)",
                     (source_task, review_id),
                 )
-            _insert_event(con, review_id, "created", {"by": "kanban-warden", "source_task": source_task, "idempotency_key": action.idempotency_key}, now)
+            _insert_event(
+                con,
+                review_id,
+                "created",
+                {
+                    "by": "kanban-warden",
+                    "source_task": source_task,
+                    "idempotency_key": action.idempotency_key,
+                },
+                now,
+            )
         return f"reviewer={review_id}"
 
     def _insert_comment(self, db_path: Path, action: PlannedAction) -> str:
@@ -329,7 +530,13 @@ class KanbanActionEngine:
                 return "comment-exists"
             body = f"{action.message}\n\nwarden-action: {action.idempotency_key}"
             _insert_comment_row(con, task_id=task_id, body=body, now=now)
-            _insert_event(con, task_id, "commented", {"by": "kanban-warden", "idempotency_key": action.idempotency_key}, now)
+            _insert_event(
+                con,
+                task_id,
+                "commented",
+                {"by": "kanban-warden", "idempotency_key": action.idempotency_key},
+                now,
+            )
         return "commented"
 
     def _unblock_task(self, db_path: Path, action: PlannedAction) -> str:
@@ -344,9 +551,18 @@ class KanbanActionEngine:
             if str(row[0]) != "blocked":
                 return f"not-blocked:{row[0]}"
             con.execute("update tasks set status = 'ready' where id = ?", (task_id,))
-            _insert_event(con, task_id, "unblocked", {"by": "kanban-warden", "reason": action.reason, "idempotency_key": action.idempotency_key}, now)
+            _insert_event(
+                con,
+                task_id,
+                "unblocked",
+                {
+                    "by": "kanban-warden",
+                    "reason": action.reason,
+                    "idempotency_key": action.idempotency_key,
+                },
+                now,
+            )
         return "unblocked"
-
 
 
 def _insert_reviewer_task(
@@ -408,15 +624,20 @@ def _insert_row(
 def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
     return {str(row[1]) for row in con.execute(f"pragma table_info({table})")}
 
+
 def _is_review_required(event: BoardEvent) -> bool:
     payload = event.payload or {}
     reason = _text(payload.get("reason")).lower()
-    return event.task_status == "blocked" and ("review-required" in reason or event.relationship.review_required)
+    return event.task_status == "blocked" and (
+        "review-required" in reason or event.relationship.review_required
+    )
 
 
 def _review_verdict(event: BoardEvent) -> str | None:
     payload = event.payload or {}
-    text = " ".join(_text(payload.get(k)).lower() for k in ("verdict", "outcome", "summary", "result", "reason"))
+    text = " ".join(
+        _text(payload.get(k)).lower() for k in ("verdict", "outcome", "summary", "result", "reason")
+    )
     if "needs-changes" in text or "needs changes" in text:
         return "needs-changes"
     if "approve" in text or "approved" in text:
@@ -437,10 +658,134 @@ def _review_source_task(event: BoardEvent) -> str | None:
 
 def _is_worker_failure(kind: str, status: str, reason: str, outcome: str) -> bool:
     text = " ".join([kind, status, reason, outcome]).lower()
-    return any(token in text for token in ("crash", "protocol violation", "gave_up", "gave up", "timed_out", "timed out"))
+    return any(
+        token in text
+        for token in ("crash", "protocol violation", "gave_up", "gave up", "timed_out", "timed out")
+    )
 
 
-def _insert_event(con: sqlite3.Connection, task_id: str, kind: str, payload: dict[str, Any], now: float) -> None:
+def _retryable_no_effect(action: PlannedAction, note: str) -> bool:
+    return action.kind == "ensure_subscription" and note in {
+        "no-related-subscription-source",
+        "notify-subs-table-missing",
+        "task-missing",
+        "missing-task",
+    }
+
+
+def _subscription_replay_cursor(
+    con: sqlite3.Connection, rows: list[tuple[Any, ...]], payload: dict[str, Any]
+) -> int:
+    event_id = _payload_event_id(payload)
+    if event_id is not None:
+        return max(0, event_id - 1)
+    latest_event = _latest_related_terminal_event_id(
+        con, [_text(row[0]) for row in rows if _text(row[0])], max_event_id=_max_event_id(con)
+    )
+    if latest_event is not None:
+        return max(0, latest_event - 1)
+    return _max_event_id(con)
+
+
+def _target_subscription_cursor(
+    con: sqlite3.Connection, task_id: str, payload: dict[str, Any], fallback: int
+) -> int:
+    event_id = _payload_event_id(payload)
+    latest_event = _latest_related_terminal_event_id(con, [task_id], max_event_id=event_id)
+    if latest_event is not None:
+        return max(0, latest_event - 1)
+    if event_id is not None and _text(payload.get("task_id")) == task_id:
+        return max(0, event_id - 1)
+    return fallback
+
+
+def _payload_event_id(payload: dict[str, Any]) -> int | None:
+    value = payload.get("event_id")
+    if value is None:
+        return None
+    try:
+        event_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return event_id if event_id > 0 else None
+
+
+def _latest_related_terminal_event_id(
+    con: sqlite3.Connection, task_ids: list[str], *, max_event_id: int | None = None
+) -> int | None:
+    if not task_ids or not _table_exists(con, "task_events"):
+        return None
+    placeholders = ",".join("?" for _ in task_ids)
+    id_column = _task_events_id_column(con)
+    if id_column is None:
+        return None
+    row = con.execute(
+        f"""
+        select max({id_column})
+        from task_events
+        where task_id in ({placeholders})
+          and kind in ('blocked', 'gave_up', 'failed', 'completed')
+          and (? is null or {id_column} <= ?)
+        """,
+        (*task_ids, max_event_id, max_event_id),
+    ).fetchone()
+    return int(row[0]) if row and row[0] is not None else None
+
+
+def _max_event_id(con: sqlite3.Connection) -> int:
+    if not _table_exists(con, "task_events"):
+        return 0
+    id_column = _task_events_id_column(con)
+    if id_column is None:
+        return 0
+    row = con.execute(f"select max({id_column}) from task_events").fetchone()
+    return int(row[0]) if row and row[0] is not None else 0
+
+
+def _task_events_id_column(con: sqlite3.Connection) -> str | None:
+    columns = _table_columns(con, "task_events")
+    if "id" in columns:
+        return "id"
+    if "event_id" in columns:
+        return "event_id"
+    return None
+
+
+def _related_subscription_tasks(con: sqlite3.Connection, task_id: str) -> list[str]:
+    if not con.execute("select 1 from tasks where id = ?", (task_id,)).fetchone():
+        return []
+    root = _root_task_id(con, task_id)
+    related: list[str] = []
+    for candidate in (root, task_id):
+        if candidate and candidate not in related:
+            related.append(candidate)
+    return related
+
+
+def _root_task_id(con: sqlite3.Connection, task_id: str) -> str:
+    root = task_id
+    seen = {task_id}
+    frontier = [task_id]
+    while frontier and _table_exists(con, "task_links"):
+        child = frontier.pop(0)
+        rows = con.execute(
+            "select parent_id from task_links where child_id = ? order by parent_id", (child,)
+        ).fetchall()
+        if not rows:
+            continue
+        for row in rows:
+            parent = _text(row[0])
+            if not parent or parent in seen:
+                continue
+            seen.add(parent)
+            root = parent
+            frontier.append(parent)
+    return root
+
+
+def _insert_event(
+    con: sqlite3.Connection, task_id: str, kind: str, payload: dict[str, Any], now: float
+) -> None:
     if not _table_exists(con, "task_events"):
         return
     con.execute(
@@ -450,7 +795,12 @@ def _insert_event(con: sqlite3.Connection, task_id: str, kind: str, payload: dic
 
 
 def _table_exists(con: sqlite3.Connection, name: str) -> bool:
-    return con.execute("select 1 from sqlite_master where type = 'table' and name = ?", (name,)).fetchone() is not None
+    return (
+        con.execute(
+            "select 1 from sqlite_master where type = 'table' and name = ?", (name,)
+        ).fetchone()
+        is not None
+    )
 
 
 def _text(value: Any) -> str:

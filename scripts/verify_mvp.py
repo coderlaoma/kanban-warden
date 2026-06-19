@@ -164,7 +164,9 @@ def main() -> int:
         dry_config = KanbanWardenConfig.from_mapping(base)
         dry_report = WardenSupervisor(dry_config, profile_name="verify-dry").dry_run(now=20)
         dry_kinds = {action["kind"] for action in dry_report["planned_actions"]}
-        assert {"notify", "create_reviewer", "comment", "unblock", "retry"}.issubset(dry_kinds), dry_kinds
+        assert {"notify", "create_reviewer", "comment", "unblock", "retry"}.issubset(dry_kinds), (
+            dry_kinds
+        )
         assert all(
             result["applied"] is False and result["note"] == "dry-run"
             for result in dry_report["action_results"]
@@ -183,7 +185,9 @@ def main() -> int:
         con = sqlite3.connect(board)
         reviewer_count = count(con, "select count(*) from tasks where id = 'review_impl'")
         impl_status = con.execute("select status from tasks where id = 'impl'").fetchone()[0]
-        comments = con.execute("select task_id, author, body from task_comments order by id").fetchall()
+        comments = con.execute(
+            "select task_id, author, body from task_comments order by id"
+        ).fetchall()
         con.close()
         state_con = sqlite3.connect(state_db)
         outbox_count = count(state_con, "select count(*) from notification_outbox")

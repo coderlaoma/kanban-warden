@@ -74,14 +74,24 @@ class WardenStateStore:
 
     def mark_action_started(self, key: str) -> bool:
         now = time.time()
-        try:
-            with self._connect() as con:
+        with self._connect() as con:
+            row = con.execute("select status from action_log where key = ?", (key,)).fetchone()
+            if row:
+                if str(row[0]) == "done":
+                    return False
                 con.execute(
-                    "insert into action_log(key, status, attempts, created_at, updated_at) values (?, 'started', 1, ?, ?)",
-                    (key, now, now),
+                    """
+                    update action_log
+                    set status = 'started', attempts = attempts + 1, updated_at = ?
+                    where key = ?
+                    """,
+                    (now, key),
                 )
-        except sqlite3.IntegrityError:
-            return False
+                return True
+            con.execute(
+                "insert into action_log(key, status, attempts, created_at, updated_at) values (?, 'started', 1, ?, ?)",
+                (key, now, now),
+            )
         return True
 
     def mark_action_done(self, key: str, note: str = "") -> None:
@@ -156,7 +166,9 @@ class WardenStateStore:
                     "select key, status, attempts from action_log order by updated_at desc, key limit 50"
                 )
             ]
-            outbox_count = int(con.execute("select count(*) from notification_outbox").fetchone()[0])
+            outbox_count = int(
+                con.execute("select count(*) from notification_outbox").fetchone()[0]
+            )
         return {
             "cursors": cursors,
             "processed_key_count": processed_count,
