@@ -31,6 +31,13 @@ class NotificationConfig:
     review_required: bool = True
     stale_tasks: bool = True
     crash_alerts: bool = True
+    delivery_enabled: bool = False
+    delivery_batch_size: int = 10
+    delivery_max_attempts: int = 3
+    delivery_backoff_seconds: float = 60.0
+    delivery_lease_seconds: float = 300.0
+    evidence_events: bool = True
+    evidence_comments: bool = False
 
 
 @dataclass(frozen=True)
@@ -183,6 +190,9 @@ def _pick(value: Any, model: type[Any]) -> dict[str, Any]:
             "stale_claims",
             "stale_tasks",
             "crash_alerts",
+            "delivery_enabled",
+            "evidence_events",
+            "evidence_comments",
         }:
             out[key] = _as_bool(raw)
         else:

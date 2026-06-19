@@ -30,14 +30,23 @@ kanban_warden:
   log_level: INFO
 
   notifications:
-    # MVP queues notification decisions to the warden state DB outbox. A future
-    # transport drainer can deliver these to Telegram/WeChat/Feishu/etc.
+    # Queue notification decisions to the warden state DB outbox.
     enabled: true
     channels:
       - origin
     review_required: true
     stale_tasks: true
     crash_alerts: true
+    # Conservative default: keep delivery off until dry-run/status output and
+    # native kanban_notify_subs coverage have been inspected.
+    delivery_enabled: false
+    delivery_batch_size: 10
+    delivery_max_attempts: 3
+    delivery_backoff_seconds: 60
+    # Evidence events are consumed by the existing Kanban native notifier path.
+    # Comments are human-visible and noisier, so leave them off by default.
+    evidence_events: true
+    evidence_comments: false
 
   auto_advance:
     # enabled=false means observe and report only. Turn on after reviewing dry-run.

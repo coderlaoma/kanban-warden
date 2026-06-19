@@ -15,6 +15,7 @@ from .actions import KanbanActionEngine
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
 from .config import BoardDatabase, KanbanWardenConfig, discover_board_databases
 from .lock import LeaderLock
+from .outbox import NotificationOutboxDrainer
 from .remediation import open_board_connection, report_to_dict, run_deadlock_remediation
 from .state import WardenStateStore
 
@@ -39,6 +40,7 @@ class WardenSupervisor:
         self.state_store = WardenStateStore(_default_state_path(config))
         self.event_tailer = BoardEventTailer(self.state_store)
         self.action_engine = KanbanActionEngine(config, self.state_store)
+        self.outbox_drainer = NotificationOutboxDrainer(config, self.state_store)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0
@@ -107,7 +109,9 @@ class WardenSupervisor:
         health: list[dict[str, Any]] = []
         planned_actions: list[dict[str, Any]] = []
         action_results: list[dict[str, Any]] = []
+        board_paths: dict[str, str] = {}
         for board in boards:
+            board_paths[board.name] = str(board.db_path)
             cursor_before = self.state_store.get_cursor(board.name)
             events = self.event_tailer.tail(board.name, board.db_path)
             cursor_after = self.state_store.get_cursor(board.name)
@@ -145,6 +149,7 @@ class WardenSupervisor:
                 result.to_dict()
                 for result in self.action_engine.apply(board.db_path, health_actions)
             )
+        outbox_delivery = self.outbox_drainer.drain(board_paths, now=current_time)
         report = {
             "profile": self.profile_name,
             "dry_run": self.config.auto_advance.dry_run,
@@ -154,6 +159,7 @@ class WardenSupervisor:
             "health": health,
             "planned_actions": planned_actions,
             "action_results": action_results,
+            "outbox_delivery": outbox_delivery,
             "state": self.state_store.snapshot(),
         }
         self.state_store.set_runtime_metadata(
