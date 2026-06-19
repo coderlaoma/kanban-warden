@@ -200,6 +200,8 @@ class KanbanActionEngine:
         event_key = event.idempotency_key()
         kind = event.kind
         payload = event.payload or {}
+        if _is_warden_notification_evidence(payload):
+            return []
         reason = _text(payload.get("reason"))
         outcome = _text(payload.get("outcome")) or _text(payload.get("verdict"))
         status = event.task_status or ""
@@ -1077,6 +1079,13 @@ def _is_worker_failure(kind: str, status: str, reason: str, outcome: str) -> boo
     return any(
         token in text
         for token in ("crash", "protocol violation", "gave_up", "gave up", "timed_out", "timed out")
+    )
+
+
+def _is_warden_notification_evidence(payload: dict[str, Any]) -> bool:
+    return (
+        _text(payload.get("by")) == "kanban-warden"
+        and _text(payload.get("event")) == "warden-notification-delivered"
     )
 
 

@@ -113,12 +113,109 @@ class WardenStateStore:
         try:
             with self._connect() as con:
                 con.execute(
-                    "insert into notification_outbox(key, payload_json, status, attempts, created_at, updated_at) values (?, ?, 'queued', 0, ?, ?)",
-                    (key, json.dumps(payload, sort_keys=True), now, now),
+                    "insert into notification_outbox(key, payload_json, status, attempts, created_at, updated_at, next_attempt_at) values (?, ?, 'queued', 0, ?, ?, ?)",
+                    (key, json.dumps(payload, sort_keys=True), now, now, 0.0),
                 )
         except sqlite3.IntegrityError:
             return False
         return True
+
+    def claim_notification_batch(
+        self, *, limit: int, now: float, owner: str = "kanban-warden"
+    ) -> list[dict[str, Any]]:
+        """Mark eligible outbox rows in-progress and return their decoded payloads."""
+
+        if limit <= 0:
+            return []
+        with self._connect() as con:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                """
+                select key, payload_json, status, attempts, last_error, created_at, updated_at, next_attempt_at
+                from notification_outbox
+                where status in ('queued', 'retrying')
+                  and coalesce(next_attempt_at, 0) <= ?
+                order by created_at, key
+                limit ?
+                """,
+                (now, limit),
+            ).fetchall()
+            if not rows:
+                return []
+            keys = [str(row["key"]) for row in rows]
+            placeholders = ",".join("?" for _ in keys)
+            con.execute(
+                f"""
+                update notification_outbox
+                set status = 'in_progress',
+                    updated_at = ?,
+                    last_error = null
+                where key in ({placeholders})
+                """,
+                (now, *keys),
+            )
+        claimed: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(str(row["payload_json"]))
+            if not isinstance(payload, dict):
+                payload = {}
+            claimed.append(
+                {
+                    "key": str(row["key"]),
+                    "payload": payload,
+                    "status": str(row["status"]),
+                    "attempts": int(row["attempts"]),
+                    "last_error": row["last_error"],
+                    "created_at": float(row["created_at"]),
+                    "updated_at": float(row["updated_at"]),
+                    "next_attempt_at": (
+                        float(row["next_attempt_at"])
+                        if row["next_attempt_at"] is not None
+                        else None
+                    ),
+                    "owner": owner,
+                }
+            )
+        return claimed
+
+    def mark_notification_delivered(self, key: str, *, now: float) -> None:
+        with self._connect() as con:
+            con.execute(
+                """
+                update notification_outbox
+                set status = 'delivered',
+                    attempts = attempts + 1,
+                    last_error = null,
+                    next_attempt_at = null,
+                    updated_at = ?
+                where key = ? and status = 'in_progress'
+                """,
+                (now, key),
+            )
+
+    def mark_notification_retry(
+        self,
+        key: str,
+        *,
+        error: str,
+        now: float,
+        next_attempt_at: float,
+        exhausted: bool = False,
+    ) -> None:
+        status = "exhausted" if exhausted else "retrying"
+        with self._connect() as con:
+            con.execute(
+                """
+                update notification_outbox
+                set status = ?,
+                    attempts = attempts + 1,
+                    last_error = ?,
+                    next_attempt_at = ?,
+                    updated_at = ?
+                where key = ? and status = 'in_progress'
+                """,
+                (status, error[:1000], next_attempt_at if not exhausted else None, now, key),
+            )
 
     def set_runtime_metadata(self, key: str, value: dict[str, Any]) -> None:
         with self._connect() as con:
@@ -166,15 +263,38 @@ class WardenStateStore:
                     "select key, status, attempts from action_log order by updated_at desc, key limit 50"
                 )
             ]
-            outbox_count = int(
-                con.execute("select count(*) from notification_outbox").fetchone()[0]
-            )
+            outbox_count = int(con.execute("select count(*) from notification_outbox").fetchone()[0])
+            outbox_by_status = {
+                str(row[0]): int(row[1])
+                for row in con.execute(
+                    "select status, count(*) from notification_outbox group by status order by status"
+                )
+            }
+            outbox_recent = [
+                {
+                    "key": str(row[0]),
+                    "status": str(row[1]),
+                    "attempts": int(row[2]),
+                    "last_error": str(row[3]) if row[3] is not None else None,
+                    "next_attempt_at": float(row[4]) if row[4] is not None else None,
+                }
+                for row in con.execute(
+                    """
+                    select key, status, attempts, last_error, next_attempt_at
+                    from notification_outbox
+                    order by updated_at desc, key
+                    limit 20
+                    """
+                )
+            ]
         return {
             "cursors": cursors,
             "processed_key_count": processed_count,
             "retry_budgets": retry_rows,
             "action_log": action_rows,
             "notification_outbox_count": outbox_count,
+            "notification_outbox_by_status": outbox_by_status,
+            "notification_outbox_recent": outbox_recent,
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -223,7 +343,13 @@ class WardenStateStore:
                   attempts integer not null default 0,
                   last_error text,
                   created_at real not null,
-                  updated_at real not null
+                  updated_at real not null,
+                  next_attempt_at real
                 );
                 """
             )
+            columns = {
+                str(row[1]) for row in con.execute("pragma table_info(notification_outbox)")
+            }
+            if "next_attempt_at" not in columns:
+                con.execute("alter table notification_outbox add column next_attempt_at real")
