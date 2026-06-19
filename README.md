@@ -136,6 +136,7 @@ kanban_warden:
     delivery_batch_size: 10
     delivery_max_attempts: 3
     delivery_backoff_seconds: 60
+    delivery_lease_seconds: 300
     evidence_events: true
     evidence_comments: false
 
@@ -163,7 +164,7 @@ Key settings:
 - `loop.health_sweep_seconds`: interval for stale/health checks.
 - `notifications.*`: controls which decisions are queued to the durable outbox and whether the native Kanban evidence drainer is active.
 - `notifications.delivery_enabled`: drains queued notification actions by writing redacted evidence to subscribed Kanban tasks. Keep false until dry-run/status output has been inspected.
-- `notifications.delivery_batch_size`, `delivery_max_attempts`, and `delivery_backoff_seconds`: bound each supervisor tick and retry cadence. Rows move through `queued`, `in_progress`, `delivered`, `retrying`, and `exhausted`.
+- `notifications.delivery_batch_size`, `delivery_max_attempts`, `delivery_backoff_seconds`, and `delivery_lease_seconds`: bound each supervisor tick, retry cadence, and stale `in_progress` lease recovery. Rows move through `queued`, `in_progress`, `delivered`, `retrying`, and `exhausted`.
 - `notifications.evidence_events`: writes a `task_events.kind='commented'` evidence row for the native notifier path.
 - `notifications.evidence_comments`: also writes a human-visible `task_comments` audit comment. This is noisier and defaults off.
 - `auto_advance.enabled`: master switch for applying state-machine actions.
@@ -274,6 +275,7 @@ kanban_warden:
     delivery_batch_size: 10
     delivery_max_attempts: 3
     delivery_backoff_seconds: 60
+    delivery_lease_seconds: 300
     evidence_events: true
     evidence_comments: false
 ```

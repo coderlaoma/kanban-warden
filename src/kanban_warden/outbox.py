@@ -56,6 +56,7 @@ class NotificationOutboxDrainer:
         rows = self.state_store.claim_notification_batch(
             limit=self.config.notifications.delivery_batch_size,
             now=current_time,
+            lease_seconds=self.config.notifications.delivery_lease_seconds,
         )
         report = {
             "enabled": True,

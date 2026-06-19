@@ -35,6 +35,7 @@ class NotificationConfig:
     delivery_batch_size: int = 10
     delivery_max_attempts: int = 3
     delivery_backoff_seconds: float = 60.0
+    delivery_lease_seconds: float = 300.0
     evidence_events: bool = True
     evidence_comments: bool = False
 

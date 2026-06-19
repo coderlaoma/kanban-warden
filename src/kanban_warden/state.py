@@ -121,24 +121,43 @@ class WardenStateStore:
         return True
 
     def claim_notification_batch(
-        self, *, limit: int, now: float, owner: str = "kanban-warden"
+        self,
+        *,
+        limit: int,
+        now: float,
+        owner: str = "kanban-warden",
+        lease_seconds: float = 300.0,
     ) -> list[dict[str, Any]]:
-        """Mark eligible outbox rows in-progress and return their decoded payloads."""
+        """Mark eligible outbox rows in-progress and return their decoded payloads.
+
+        ``in_progress`` rows carry a lease in ``next_attempt_at``. If a worker
+        crashes after claiming but before it marks the row delivered/retrying,
+        a later claim may reclaim the row after the lease expires without
+        incrementing attempts. Legacy rows without a lease fall back to
+        ``updated_at + lease_seconds`` so already stranded rows also recover.
+        """
 
         if limit <= 0:
             return []
+        lease_seconds = max(0.0, float(lease_seconds))
         with self._connect() as con:
             con.row_factory = sqlite3.Row
             rows = con.execute(
                 """
                 select key, payload_json, status, attempts, last_error, created_at, updated_at, next_attempt_at
                 from notification_outbox
-                where status in ('queued', 'retrying')
-                  and coalesce(next_attempt_at, 0) <= ?
+                where (
+                    status in ('queued', 'retrying')
+                    and coalesce(next_attempt_at, 0) <= ?
+                )
+                or (
+                    status = 'in_progress'
+                    and coalesce(nullif(next_attempt_at, 0), updated_at + ?) <= ?
+                )
                 order by created_at, key
                 limit ?
                 """,
-                (now, limit),
+                (now, lease_seconds, now, limit),
             ).fetchall()
             if not rows:
                 return []
@@ -149,10 +168,11 @@ class WardenStateStore:
                 update notification_outbox
                 set status = 'in_progress',
                     updated_at = ?,
+                    next_attempt_at = ?,
                     last_error = null
                 where key in ({placeholders})
                 """,
-                (now, *keys),
+                (now, now + lease_seconds, *keys),
             )
         claimed: list[dict[str, Any]] = []
         for row in rows:

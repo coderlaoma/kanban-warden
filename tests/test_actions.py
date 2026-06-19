@@ -879,6 +879,39 @@ def test_stale_running_health_also_repairs_subscription_and_queues_notification(
     )
 
 
+
+def test_notification_outbox_stale_in_progress_rows_are_reclaimed(tmp_path: Path) -> None:
+    store = WardenStateStore(str(tmp_path / "state.db"))
+    assert store.enqueue_notification(
+        "stale-key",
+        {"board_name": "default", "target_task_id": "impl", "kind": "review_required"},
+    )
+
+    first = store.claim_notification_batch(limit=1, now=20)
+    assert [row["key"] for row in first] == ["stale-key"]
+    con = sqlite3.connect(tmp_path / "state.db")
+    assert con.execute(
+        "select status, attempts, next_attempt_at from notification_outbox where key = ?",
+        ("stale-key",),
+    ).fetchone() == ("in_progress", 0, 320.0)
+    assert store.claim_notification_batch(limit=1, now=319) == []
+    con.execute(
+        "update notification_outbox set next_attempt_at = 0 where key = ?",
+        ("stale-key",),
+    )
+    con.commit()
+
+    reclaimed = store.claim_notification_batch(limit=1, now=10_000)
+
+    assert [row["key"] for row in reclaimed] == ["stale-key"]
+    assert reclaimed[0]["attempts"] == 0
+    store.mark_notification_delivered("stale-key", now=10_001)
+    assert con.execute(
+        "select status, attempts, last_error, next_attempt_at from notification_outbox where key = ?",
+        ("stale-key",),
+    ).fetchone() == ("delivered", 1, None, None)
+
+
 def test_notification_outbox_drain_delivers_to_native_subscriber_evidence(
     tmp_path: Path,
 ) -> None:
