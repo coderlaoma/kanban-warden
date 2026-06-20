@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -9,6 +10,8 @@ import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+from .sqlite_utils import managed_connection
 
 _TERMINAL_PARENT_STATUSES = {"done", "archived"}
 _FIX_RE = re.compile(
@@ -121,15 +124,13 @@ def run_deadlock_remediation(
 ) -> DeadlockScanReport:
     """Scan one Kanban board connection for safe dependency-deadlock remediations.
 
-    The function is intentionally conservative: it only mutates low-risk erroneous
-    parent edges for fix/recovery/reviewer cards, and only when ``auto_advance`` is
-    enabled and ``dry_run`` is false. Dry-runs return deterministic proposals and do
-    not create action-log rows or change board state.
+    The function is intentionally conservative: it returns deterministic proposals
+    only. Kanban Warden may write its own state database, but board database writes
+    are owned by the gateway/Hermes path so scans never create action-log rows or
+    change board task state.
     """
 
     conn.row_factory = sqlite3.Row
-    if not dry_run:
-        _ensure_action_log(conn)
     tasks = _load_tasks(conn)
     comments = _load_comments(conn)
     events = _load_events(conn)
@@ -149,10 +150,7 @@ def run_deadlock_remediation(
         )
         if proposal is None:
             continue
-        if dry_run or not auto_advance:
-            proposals.append(proposal)
-            continue
-        proposals.append(_apply_proposal(conn, proposal, now=now, max_retries=max_retries))
+        proposals.append(proposal)
     remediated_children = {
         proposal.primary_task_id for proposal in proposals if proposal.would_mutate
     }
@@ -169,10 +167,7 @@ def run_deadlock_remediation(
         )
         if proposal is None:
             continue
-        if dry_run or not auto_advance:
-            proposals.append(proposal)
-            continue
-        proposals.append(_apply_promotion(conn, proposal, now=now, max_retries=max_retries))
+        proposals.append(proposal)
     return DeadlockScanReport(
         board=board,
         dry_run=dry_run,
@@ -181,12 +176,16 @@ def run_deadlock_remediation(
     )
 
 
-def open_board_connection(db_path: str) -> sqlite3.Connection:
+def open_board_connection(db_path: str):
     """Open a Hermes Kanban SQLite database for health-sweep remediation."""
 
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    return conn
+    @contextlib.contextmanager
+    def _with_row_factory():
+        with managed_connection(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            yield conn
+
+    return _with_row_factory()
 
 
 def _build_stale_ready_proposal(
@@ -235,38 +234,6 @@ def _build_stale_ready_proposal(
     )
 
 
-def _apply_promotion(
-    conn: sqlite3.Connection,
-    proposal: DeadlockProposal,
-    *,
-    now: int,
-    max_retries: int,
-) -> DeadlockProposal:
-    existing_status = _existing_action_terminal_status(conn, proposal, max_retries=max_retries)
-    if existing_status in {"succeeded_noop", "retry_exhausted"}:
-        return _replace_status(proposal, existing_status)
-    if proposal.edge_child_id is None:
-        return _replace_status(proposal, "skipped")
-    row = conn.execute(
-        "SELECT status FROM tasks WHERE id = ?", (proposal.edge_child_id,)
-    ).fetchone()
-    if row is None or str(row["status"]) != "todo" or not _all_parents_done_or_archived(
-        conn, proposal.edge_child_id
-    ):
-        _insert_action_log(
-            conn, proposal, now=now, status="succeeded_noop", max_retries=max_retries
-        )
-        return _replace_status(proposal, "succeeded_noop")
-    conn.execute(
-        "UPDATE tasks SET status = 'ready' WHERE id = ? AND status = 'todo'",
-        (proposal.edge_child_id,),
-    )
-    conn.execute(
-        "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-        (proposal.edge_child_id, "promoted", json.dumps({"by": "kanban-warden"}), now),
-    )
-    _insert_action_log(conn, proposal, now=now, status="applied", max_retries=max_retries)
-    return _replace_status(proposal, "applied")
 
 
 def _build_edge_proposal(
@@ -342,194 +309,6 @@ def _build_edge_proposal(
     )
 
 
-def _existing_action_terminal_status(
-    conn: sqlite3.Connection,
-    proposal: DeadlockProposal,
-    *,
-    max_retries: int,
-) -> str | None:
-    existing = conn.execute(
-        """
-        SELECT status, attempt_count, max_retries
-          FROM kanban_warden_action_log
-         WHERE action_key = ?
-        """,
-        (proposal.action_key,),
-    ).fetchone()
-    if existing is None:
-        # Tests and older prototypes may have used a placeholder evidence hash. Treat a matching
-        # non-successful row for the same action tuple as the same retry budget.
-        existing = conn.execute(
-            """
-            SELECT status, attempt_count, max_retries
-              FROM kanban_warden_action_log
-             WHERE board = ? AND action_type = ? AND primary_task_id = ?
-               AND secondary_task_id = ? AND status NOT IN ('applied', 'succeeded_noop')
-             ORDER BY updated_at DESC, id DESC LIMIT 1
-            """,
-            (
-                _board_from_key(proposal.action_key),
-                proposal.action_type,
-                proposal.primary_task_id,
-                proposal.secondary_task_id,
-            ),
-        ).fetchone()
-    if existing is None:
-        return None
-    status = str(existing["status"])
-    attempts = int(existing["attempt_count"] or 0)
-    limit = int(existing["max_retries"] or max_retries)
-    if status in {"applied", "succeeded_noop"}:
-        return "succeeded_noop"
-    if attempts >= limit:
-        return "retry_exhausted"
-    return None
-
-
-def _apply_proposal(
-    conn: sqlite3.Connection,
-    proposal: DeadlockProposal,
-    *,
-    now: int,
-    max_retries: int,
-) -> DeadlockProposal:
-    existing_status = _existing_action_terminal_status(conn, proposal, max_retries=max_retries)
-    if existing_status in {"succeeded_noop", "retry_exhausted"}:
-        return _replace_status(proposal, existing_status)
-
-    if not _edge_exists(conn, proposal.edge_parent_id, proposal.edge_child_id):
-        _insert_action_log(
-            conn, proposal, now=now, status="succeeded_noop", max_retries=max_retries
-        )
-        return _replace_status(proposal, "succeeded_noop")
-
-    _add_audit_comments(conn, proposal, now=now)
-    conn.execute(
-        "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
-        (proposal.edge_parent_id, proposal.edge_child_id),
-    )
-    if (
-        proposal.edge_child_id is not None
-        and _all_parents_done_or_archived(conn, proposal.edge_child_id)
-    ):
-        conn.execute(
-            "UPDATE tasks SET status = 'ready' WHERE id = ? AND status IN ('todo', 'blocked')",
-            (proposal.edge_child_id,),
-        )
-        conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-            (proposal.edge_child_id, "promoted", None, now),
-        )
-    if proposal.edge_child_id is not None:
-        conn.execute(
-            "INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
-            (
-                proposal.edge_child_id,
-                "unlinked",
-                json.dumps({"parent": proposal.edge_parent_id, "child": proposal.edge_child_id}),
-                now,
-            ),
-        )
-    _insert_action_log(conn, proposal, now=now, status="applied", max_retries=max_retries)
-    return _replace_status(proposal, "applied")
-
-
-def _ensure_action_log(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS kanban_warden_action_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            board TEXT NOT NULL,
-            action_key TEXT NOT NULL UNIQUE,
-            action_type TEXT NOT NULL,
-            status TEXT NOT NULL,
-            primary_task_id TEXT,
-            secondary_task_id TEXT,
-            edge_parent_id TEXT,
-            edge_child_id TEXT,
-            predicate TEXT,
-            evidence TEXT,
-            planned_actions TEXT,
-            result TEXT,
-            attempt_count INTEGER NOT NULL DEFAULT 0,
-            max_retries INTEGER NOT NULL DEFAULT 2,
-            last_error_class TEXT,
-            last_error_redacted TEXT
-        )
-        """
-    )
-
-
-def _insert_action_log(
-    conn: sqlite3.Connection,
-    proposal: DeadlockProposal,
-    *,
-    now: int,
-    status: str,
-    max_retries: int,
-) -> None:
-    conn.execute(
-        """
-        INSERT INTO kanban_warden_action_log (
-            created_at, updated_at, board, action_key, action_type, status,
-            primary_task_id, secondary_task_id, edge_parent_id, edge_child_id,
-            predicate, evidence, planned_actions, result, attempt_count, max_retries
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(action_key) DO UPDATE SET
-            updated_at = excluded.updated_at,
-            status = excluded.status,
-            evidence = excluded.evidence,
-            planned_actions = excluded.planned_actions,
-            result = excluded.result,
-            attempt_count = kanban_warden_action_log.attempt_count + 1,
-            max_retries = excluded.max_retries
-        """,
-        (
-            now,
-            now,
-            _board_from_key(proposal.action_key),
-            proposal.action_key,
-            proposal.action_type,
-            status,
-            proposal.primary_task_id,
-            proposal.secondary_task_id,
-            proposal.edge_parent_id,
-            proposal.edge_child_id,
-            proposal.predicate,
-            json.dumps(proposal.evidence, sort_keys=True),
-            json.dumps(proposal.planned_actions),
-            json.dumps({"status": status}, sort_keys=True),
-            1,
-            max_retries,
-        ),
-    )
-
-
-def _add_audit_comments(conn: sqlite3.Connection, proposal: DeadlockProposal, *, now: int) -> None:
-    if proposal.edge_child_id is None:
-        return
-    parent = proposal.edge_parent_id or "unknown"
-    child_body = (
-        "[kanban-warden] Detected dependency deadlock: this recovery/review card was "
-        f"blocked by parent {parent}. Removing only the erroneous hard dependency; "
-        "the source task is not completed or archived."
-    )
-    conn.execute(
-        "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
-        (proposal.edge_child_id, "kanban-warden", child_body, now),
-    )
-    if proposal.edge_parent_id is not None:
-        parent_body = (
-            "[kanban-warden] Detected child card dependency deadlock with "
-            f"{proposal.edge_child_id}. The child dependency edge was removed so the "
-            "repair/review can run; this source task remains unfinished."
-        )
-        conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) VALUES (?, ?, ?, ?)",
-            (proposal.edge_parent_id, "kanban-warden", parent_body, now),
-        )
 
 
 def _load_tasks(conn: sqlite3.Connection) -> dict[str, _TaskSnapshot]:
@@ -629,15 +408,6 @@ def _has_claim_rejected_parents_not_done(events: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _edge_exists(conn: sqlite3.Connection, parent_id: str | None, child_id: str | None) -> bool:
-    if parent_id is None or child_id is None:
-        return False
-    return bool(
-        conn.execute(
-            "SELECT 1 FROM task_links WHERE parent_id = ? AND child_id = ?",
-            (parent_id, child_id),
-        ).fetchone()
-    )
 
 
 def _has_parent(conn: sqlite3.Connection, task_id: str) -> bool:
@@ -683,21 +453,6 @@ def _board_from_key(action_key: str) -> str:
     return parts[2] if len(parts) >= 3 else "default"
 
 
-def _replace_status(proposal: DeadlockProposal, status: str) -> DeadlockProposal:
-    return DeadlockProposal(
-        action_key=proposal.action_key,
-        action_type=proposal.action_type,
-        primary_task_id=proposal.primary_task_id,
-        secondary_task_id=proposal.secondary_task_id,
-        edge_parent_id=proposal.edge_parent_id,
-        edge_child_id=proposal.edge_child_id,
-        predicate=proposal.predicate,
-        evidence=proposal.evidence,
-        planned_actions=proposal.planned_actions,
-        would_mutate=proposal.would_mutate,
-        dry_run=proposal.dry_run,
-        status=status,
-    )
 
 
 def _json_loads(value: Any) -> Any:

@@ -7,10 +7,7 @@ small Kanban state transitions through SQLite when auto-advance is enabled.
 
 from __future__ import annotations
 
-import json
 import re
-import sqlite3
-import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +28,8 @@ ActionKind = Literal[
     "retry",
     "escalate",
 ]
+
+_BOARD_WRITE_DISABLED = "board-write-disabled"
 
 
 @dataclass(frozen=True)
@@ -190,6 +189,9 @@ class KanbanActionEngine:
                 results.append(ActionResult(action, applied=False, skipped=True, note=note))
                 continue
             self.state_store.mark_action_done(action.idempotency_key, note)
+            if note == _BOARD_WRITE_DISABLED:
+                results.append(ActionResult(action, applied=False, note=note))
+                continue
             results.append(ActionResult(action, applied=True, note=note))
         return results
 
@@ -469,578 +471,44 @@ class KanbanActionEngine:
 
     def _apply_one(self, db_path: Path, action: PlannedAction) -> str:
         if action.kind == "ensure_subscription":
-            return self._ensure_related_subscriptions(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind == "notify":
             self.state_store.enqueue_notification(action.idempotency_key, action.to_dict())
             return "queued-notification"
         if action.kind == "create_reviewer":
-            return self._create_reviewer(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind == "create_implementer_followup":
-            return self._create_implementer_followup(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind == "comment":
-            return self._insert_comment(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind in {"unblock", "retry"}:
             self.state_store.bump_retry(
                 action.board_name,
                 action.target_task_id or action.task_id or "",
                 _text(action.payload.get("recovery_kind")) or action.kind,
             )
-            return self._unblock_task(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind == "promote":
-            return self._promote_task(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind == "finalize":
-            return self._finalize_task(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         if action.kind == "escalate":
-            self.state_store.enqueue_notification(action.idempotency_key, action.to_dict())
-            return self._insert_comment(db_path, action)
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
         return "noop"
 
-    def _ensure_related_subscriptions(self, db_path: Path, action: PlannedAction) -> str:
-        """Copy existing Kanban notify subscriptions between a stuck task and its root.
+    def _queue_gateway_proposal(self, action: PlannedAction) -> None:
+        payload = action.to_dict()
+        payload["delivery"] = "gateway-required"
+        self.state_store.enqueue_notification(action.idempotency_key, payload)
 
-        Gateway entry keeps the normal policy of subscribing only the root card. When a
-        decomposed child gets blocked or a worker gives up, this fallback makes the
-        root and the stuck child both observable by the native Kanban notifier without
-        requiring the entrypoint to subscribe every child up front. It is best-effort:
-        if no related subscription exists, the warden records that fact and relies on
-        the queued notification/outbox plus logs for operator visibility.
-        """
-        task_id = action.target_task_id or action.task_id
-        if not task_id:
-            return "missing-task"
-        with sqlite3.connect(db_path) as con:
-            if not _table_exists(con, "kanban_notify_subs"):
-                return "notify-subs-table-missing"
-            related = _related_subscription_tasks(con, task_id)
-            if not related:
-                return "task-missing"
-            placeholders = ",".join("?" for _ in related)
-            rows = con.execute(
-                f"""
-                select task_id, platform, chat_id, thread_id, user_id, notifier_profile, last_event_id
-                from kanban_notify_subs
-                where task_id in ({placeholders})
-                order by case when task_id = ? then 0 else 1 end, created_at
-                """,
-                (*related, related[0]),
-            ).fetchall()
-            if not rows:
-                return "no-related-subscription-source"
-            now = int(time.time())
-            source_cursor = _subscription_replay_cursor(con, rows, action.payload)
-            inserted = 0
-            for target_id in related:
-                target_cursor = _target_subscription_cursor(
-                    con, target_id, action.payload, source_cursor
-                )
-                for row in rows:
-                    before = con.total_changes
-                    con.execute(
-                        """
-                        insert or ignore into kanban_notify_subs(
-                          task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id
-                        ) values (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            target_id,
-                            row[1],
-                            row[2],
-                            row[3] or "",
-                            row[4],
-                            row[5],
-                            now,
-                            target_cursor,
-                        ),
-                    )
-                    changed = con.total_changes - before
-                    inserted += changed
-                    if not changed:
-                        con.execute(
-                            """
-                            update kanban_notify_subs
-                            set last_event_id = ?
-                            where task_id = ?
-                              and platform = ?
-                              and chat_id = ?
-                              and thread_id = ?
-                              and last_event_id < ?
-                            """,
-                            (target_cursor, target_id, row[1], row[2], row[3] or "", target_cursor),
-                        )
-            if inserted:
-                _insert_event(
-                    con,
-                    task_id,
-                    "commented",
-                    {
-                        "by": "kanban-warden",
-                        "idempotency_key": action.idempotency_key,
-                        "note": "ensured root/stuck-task notify subscriptions",
-                        "related_tasks": related,
-                        "inserted": inserted,
-                    },
-                    now,
-                )
-            return f"ensured-subscriptions inserted={inserted} related={','.join(related)}"
-
-    def _create_reviewer(self, db_path: Path, action: PlannedAction) -> str:
-        source_task = action.task_id
-        if not source_task:
-            return "missing-source-task"
-        review_id = f"review_{source_task}"
-        now = int(time.time())
-        with sqlite3.connect(db_path) as con:
-            _insert_reviewer_task(
-                con,
-                review_id=review_id,
-                source_task=source_task,
-                reviewer_assignee=self.config.auto_advance.reviewer_assignee,
-                idempotency_key=action.idempotency_key,
-                now=now,
-            )
-            if _table_exists(con, "task_links"):
-                con.execute(
-                    "insert or ignore into task_links(parent_id, child_id) values (?, ?)",
-                    (source_task, review_id),
-                )
-            _insert_event(
-                con,
-                review_id,
-                "created",
-                {
-                    "by": "kanban-warden",
-                    "source_task": source_task,
-                    "idempotency_key": action.idempotency_key,
-                },
-                now,
-            )
-        return f"reviewer={review_id}"
-
-    def _create_implementer_followup(self, db_path: Path, action: PlannedAction) -> str:
-        source_task = action.task_id
-        review_task = _text(action.payload.get("review_task"))
-        if not source_task or not review_task:
-            return "missing-source-or-review-task"
-        followup_id = _followup_task_id(source_task, review_task)
-        now = int(time.time())
-        with sqlite3.connect(db_path) as con:
-            existing = con.execute("select 1 from tasks where id = ?", (followup_id,)).fetchone()
-            assignee = _task_assignee(con, source_task) or _text(
-                self.config.auto_advance.implementer_assignee
-            )
-            if not assignee:
-                _insert_missing_implementer_assignee_comment(
-                    con,
-                    source_task=source_task,
-                    review_task=review_task,
-                    idempotency_key=action.idempotency_key,
-                    now=now,
-                )
-                return "missing-implementer-assignee"
-            review_request = _review_fix_request(action.payload)
-            _insert_implementer_followup_task(
-                con,
-                followup_id=followup_id,
-                source_task=source_task,
-                review_task=review_task,
-                assignee=assignee,
-                body=review_request,
-                idempotency_key=action.idempotency_key,
-                now=now,
-            )
-            if _table_exists(con, "task_links"):
-                con.execute(
-                    "insert or ignore into task_links(parent_id, child_id) values (?, ?)",
-                    (source_task, followup_id),
-                )
-            sub_note = _backfill_followup_subscriptions(con, source_task, followup_id, action.payload, now)
-            if not existing:
-                _insert_event(
-                    con,
-                    followup_id,
-                    "created",
-                    {
-                        "by": "kanban-warden",
-                        "source_task": source_task,
-                        "review_task": review_task,
-                        "idempotency_key": action.idempotency_key,
-                    },
-                    now,
-                )
-            return f"implementer_followup={followup_id} assignee={assignee} {sub_note}"
-
-    def _insert_comment(self, db_path: Path, action: PlannedAction) -> str:
-        task_id = action.target_task_id or action.task_id
-        if not task_id:
-            return "missing-task"
-        now = int(time.time())
-        with sqlite3.connect(db_path) as con:
-            if not _table_exists(con, "task_comments"):
-                return "comments-table-missing"
-            existing = con.execute(
-                "select 1 from task_comments where task_id = ? and body like ? limit 1",
-                (task_id, f"%{action.idempotency_key}%"),
-            ).fetchone()
-            if existing:
-                return "comment-exists"
-            body = f"{action.message}\n\nwarden-action: {action.idempotency_key}"
-            _insert_comment_row(con, task_id=task_id, body=body, now=now)
-            _insert_event(
-                con,
-                task_id,
-                "commented",
-                {"by": "kanban-warden", "idempotency_key": action.idempotency_key},
-                now,
-            )
-        return "commented"
-
-    def _unblock_task(self, db_path: Path, action: PlannedAction) -> str:
-        task_id = action.target_task_id or action.task_id
-        if not task_id:
-            return "missing-task"
-        now = time.time()
-        with sqlite3.connect(db_path) as con:
-            row = con.execute("select status from tasks where id = ?", (task_id,)).fetchone()
-            if not row:
-                return "task-missing"
-            if str(row[0]) != "blocked":
-                return f"not-blocked:{row[0]}"
-            con.execute("update tasks set status = 'ready' where id = ?", (task_id,))
-            _insert_event(
-                con,
-                task_id,
-                "unblocked",
-                {
-                    "by": "kanban-warden",
-                    "reason": action.reason,
-                    "idempotency_key": action.idempotency_key,
-                },
-                now,
-            )
-        return "unblocked"
-
-    def _promote_task(self, db_path: Path, action: PlannedAction) -> str:
-        task_id = action.target_task_id or action.task_id
-        if not task_id:
-            return "missing-task"
-        now = time.time()
-        with sqlite3.connect(db_path) as con:
-            row = con.execute("select status from tasks where id = ?", (task_id,)).fetchone()
-            if not row:
-                return "task-missing"
-            if str(row[0]) not in {"todo", "blocked"}:
-                return f"not-promotable:{row[0]}"
-            if not _all_parents_done_or_archived(con, task_id):
-                return "parents-not-done"
-            con.execute("update tasks set status = 'ready' where id = ?", (task_id,))
-            _insert_event(
-                con,
-                task_id,
-                "promoted",
-                {
-                    "by": "kanban-warden",
-                    "reason": action.reason,
-                    "idempotency_key": action.idempotency_key,
-                },
-                now,
-            )
-        return "promoted"
-
-    def _finalize_task(self, db_path: Path, action: PlannedAction) -> str:
-        task_id = action.target_task_id or action.task_id
-        if not task_id:
-            return "missing-task"
-        now = time.time()
-        with sqlite3.connect(db_path) as con:
-            row = con.execute("select status from tasks where id = ?", (task_id,)).fetchone()
-            if not row:
-                return "task-missing"
-            if str(row[0]) in {"done", "completed", "cancelled", "archived"}:
-                return f"already-terminal:{row[0]}"
-            if not _children_done_or_archived(con, task_id):
-                return "children-not-done"
-            if _has_unresolved_needs_changes(con, task_id):
-                return "unresolved-needs-changes"
-            columns = _table_columns(con, "tasks")
-            if "completed_at" in columns:
-                con.execute(
-                    "update tasks set status = 'done', completed_at = ? where id = ?",
-                    (now, task_id),
-                )
-            else:
-                con.execute("update tasks set status = 'done' where id = ?", (task_id,))
-            _insert_event(
-                con,
-                task_id,
-                "completed",
-                {
-                    "by": "kanban-warden",
-                    "reason": action.reason,
-                    "idempotency_key": action.idempotency_key,
-                },
-                now,
-            )
-            if _table_exists(con, "task_comments"):
-                _insert_comment_row(
-                    con,
-                    task_id=task_id,
-                    body=f"[kanban-warden-finalized] {action.reason}\n\nwarden-action: {action.idempotency_key}",
-                    now=int(now),
-                )
-        return "finalized"
-
-
-def _all_parents_done_or_archived(con: sqlite3.Connection, task_id: str) -> bool:
-    if not _table_exists(con, "task_links"):
-        return True
-    rows = con.execute("select parent_id from task_links where child_id = ?", (task_id,)).fetchall()
-    if not rows:
-        return True
-    for row in rows:
-        status = con.execute("select status from tasks where id = ?", (row[0],)).fetchone()
-        if not status or str(status[0]) not in {"done", "completed", "cancelled", "archived"}:
-            return False
-    return True
-
-
-def _children_done_or_archived(con: sqlite3.Connection, task_id: str) -> bool:
-    if not _table_exists(con, "task_links"):
-        return True
-    rows = con.execute("select child_id from task_links where parent_id = ?", (task_id,)).fetchall()
-    if not rows:
-        return True
-    for row in rows:
-        status = con.execute("select status from tasks where id = ?", (row[0],)).fetchone()
-        if not status or str(status[0]) not in {"done", "completed", "cancelled", "archived"}:
-            return False
-    return True
-
-
-def _has_unresolved_needs_changes(con: sqlite3.Connection, task_id: str) -> bool:
-    if not _table_exists(con, "task_comments"):
-        return False
-    rows = con.execute(
-        "select body from task_comments where task_id = ? order by id", (task_id,)
-    ).fetchall()
-    text = "\n".join(str(row[0] or "").lower() for row in rows)
-    return (
-        "needs-changes" in text or "needs changes" in text
-    ) and "warden-review-approved" not in text
-
-
-
-def _followup_task_id(source_task: str, review_task: str) -> str:
-    return f"fix_{_safe_task_id_part(source_task)}_{_safe_task_id_part(review_task)}"[:120]
-
-
-def _safe_task_id_part(value: str) -> str:
-    cleaned = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in value.strip())
-    return cleaned.strip("_") or "task"
-
-
-def _task_assignee(con: sqlite3.Connection, task_id: str) -> str | None:
-    if "assignee" not in _table_columns(con, "tasks"):
-        return None
-    row = con.execute("select assignee from tasks where id = ?", (task_id,)).fetchone()
-    assignee = _text(row[0]).strip() if row else ""
-    return assignee or None
-
-
-def _review_fix_request(payload: dict[str, Any]) -> str:
-    review_task = _text(payload.get("review_task"))
-    source_task = _text(payload.get("source_task"))
-    review_payload = payload.get("review_payload") if isinstance(payload.get("review_payload"), dict) else {}
-    assert isinstance(review_payload, dict)
-    request = _text(review_payload.get("body")) or _text(review_payload.get("comment"))
-    if not request:
-        request = _text(review_payload.get("summary")) or _text(review_payload.get("result"))
-    if not request:
-        request = _text(review_payload.get("reason")) or _text(review_payload.get("outcome"))
-    if not request:
-        request = "NEEDS-CHANGES: address the reviewer feedback from the linked review card."
-    if "needs-changes" not in request.lower() and "needs changes" not in request.lower():
-        request = f"NEEDS-CHANGES: {request}"
-    return (
-        f"Follow-up implementation for review {review_task} on source task {source_task}.\n\n"
-        f"Review request:\n{request}\n\n"
-        "Please make the minimal fix requested by the reviewer, preserve existing behavior, "
-        "run focused verification, and hand off for review."
-    )
-
-def _insert_implementer_followup_task(
-    con: sqlite3.Connection,
-    *,
-    followup_id: str,
-    source_task: str,
-    review_task: str,
-    assignee: str,
-    body: str,
-    idempotency_key: str,
-    now: int,
-) -> None:
-    values: dict[str, Any] = {
-        "id": followup_id,
-        "title": f"Fix review changes for {source_task}",
-        "body": body,
-        "status": "ready",
-        "assignee": assignee,
-        "priority": 0,
-        "created_by": "kanban-warden",
-        "created_at": now,
-        "workspace_kind": "scratch",
-        "idempotency_key": idempotency_key,
-        "consecutive_failures": 0,
-        "goal_mode": 0,
-    }
-    _insert_row(con, "tasks", values, conflict="or ignore")
-
-
-def _insert_missing_implementer_assignee_comment(
-    con: sqlite3.Connection,
-    *,
-    source_task: str,
-    review_task: str,
-    idempotency_key: str,
-    now: int,
-) -> None:
-    if not _table_exists(con, "task_comments"):
-        return
-    body = (
-        f"[warden-review-needs-changes] reviewer {review_task} requested changes, "
-        "but a missing implementer assignee means none could be inferred from the source task and "
-        "auto_advance.implementer_assignee is not configured. Follow-up creation skipped "
-        "to avoid assigning implementation work to the reviewer.\n\n"
-        f"warden-action: {idempotency_key}"
-    )
-    existing = con.execute(
-        "select 1 from task_comments where task_id = ? and body like ? limit 1",
-        (source_task, f"%{idempotency_key}%"),
-    ).fetchone()
-    if existing:
-        return
-    _insert_comment_row(con, task_id=source_task, body=body, now=now)
-    _insert_event(
-        con,
-        source_task,
-        "commented",
-        {
-            "by": "kanban-warden",
-            "idempotency_key": idempotency_key,
-            "reason": "missing implementer assignee",
-        },
-        now,
-    )
-
-
-def _backfill_followup_subscriptions(
-    con: sqlite3.Connection,
-    source_task: str,
-    followup_id: str,
-    payload: dict[str, Any],
-    now: int,
-) -> str:
-    if not _table_exists(con, "kanban_notify_subs"):
-        return "subscriptions=table-missing"
-    rows = con.execute(
-        """
-        select platform, chat_id, thread_id, user_id, notifier_profile, last_event_id
-        from kanban_notify_subs
-        where task_id = ?
-        """,
-        (source_task,),
-    ).fetchall()
-    if not rows:
-        return "subscriptions=no-source"
-    cursor = _max_event_id(con)
-    inserted = 0
-    updated = 0
-    for row in rows:
-        before = con.total_changes
-        con.execute(
-            """
-            insert or ignore into kanban_notify_subs(
-              task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id
-            ) values (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (followup_id, row[0], row[1], row[2] or "", row[3], row[4], now, cursor),
-        )
-        if con.total_changes > before:
-            inserted += 1
-        else:
-            before_update = con.total_changes
-            con.execute(
-                """
-                update kanban_notify_subs
-                set last_event_id = ?
-                where task_id = ?
-                  and platform = ?
-                  and chat_id = ?
-                  and thread_id = ?
-                  and last_event_id < ?
-                """,
-                (cursor, followup_id, row[0], row[1], row[2] or "", cursor),
-            )
-            updated += con.total_changes - before_update
-    return f"subscriptions=inserted:{inserted},updated:{updated},cursor:{cursor}"
-
-def _insert_reviewer_task(
-    con: sqlite3.Connection,
-    *,
-    review_id: str,
-    source_task: str,
-    reviewer_assignee: str,
-    idempotency_key: str,
-    now: int,
-) -> None:
-    """Insert a reviewer card using only columns present in the live schema.
-
-    Hermes Kanban schemas evolve. The real schema has NOT NULL columns such as
-    ``workspace_kind`` that are absent from older test fixtures, so direct INSERT
-    statements must be built from PRAGMA table_info instead of assuming one fixed
-    fixture shape.
-    """
-    values: dict[str, Any] = {
-        "id": review_id,
-        "title": f"Review {source_task}",
-        "body": f"Review implementation card {source_task}.",
-        "status": "ready",
-        "assignee": reviewer_assignee,
-        "priority": 0,
-        "created_by": "kanban-warden",
-        "created_at": now,
-        "workspace_kind": "scratch",
-        "idempotency_key": idempotency_key,
-        "consecutive_failures": 0,
-        "goal_mode": 0,
-    }
-    _insert_row(con, "tasks", values, conflict="or ignore")
-
-
-def _insert_comment_row(con: sqlite3.Connection, *, task_id: str, body: str, now: int) -> None:
-    values: dict[str, Any] = {
-        "task_id": task_id,
-        "author": "kanban-warden",
-        "body": body,
-        "created_at": now,
-    }
-    _insert_row(con, "task_comments", values)
-
-
-def _insert_row(
-    con: sqlite3.Connection, table: str, values: dict[str, Any], *, conflict: str = ""
-) -> None:
-    columns = [name for name in values if name in _table_columns(con, table)]
-    if not columns:
-        return
-    placeholders = ", ".join("?" for _ in columns)
-    column_sql = ", ".join(columns)
-    conflict_sql = f" {conflict}" if conflict else ""
-    sql = f"insert{conflict_sql} into {table}({column_sql}) values ({placeholders})"
-    con.execute(sql, tuple(values[name] for name in columns))
-
-
-def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row[1]) for row in con.execute(f"pragma table_info({table})")}
 
 
 def _is_review_required(event: BoardEvent) -> bool:
@@ -1138,134 +606,6 @@ def _retryable_no_effect(action: PlannedAction, note: str) -> bool:
     }
 
 
-def _subscription_replay_cursor(
-    con: sqlite3.Connection, rows: list[tuple[Any, ...]], payload: dict[str, Any]
-) -> int:
-    event_id = _payload_event_id(payload)
-    if event_id is not None:
-        return max(0, event_id - 1)
-    latest_event = _latest_related_terminal_event_id(
-        con, [_text(row[0]) for row in rows if _text(row[0])], max_event_id=_max_event_id(con)
-    )
-    if latest_event is not None:
-        return max(0, latest_event - 1)
-    return _max_event_id(con)
-
-
-def _target_subscription_cursor(
-    con: sqlite3.Connection, task_id: str, payload: dict[str, Any], fallback: int
-) -> int:
-    event_id = _payload_event_id(payload)
-    latest_event = _latest_related_terminal_event_id(con, [task_id], max_event_id=event_id)
-    if latest_event is not None:
-        return max(0, latest_event - 1)
-    if event_id is not None and _text(payload.get("task_id")) == task_id:
-        return max(0, event_id - 1)
-    return fallback
-
-
-def _payload_event_id(payload: dict[str, Any]) -> int | None:
-    value = payload.get("event_id")
-    if value is None:
-        return None
-    try:
-        event_id = int(value)
-    except (TypeError, ValueError):
-        return None
-    return event_id if event_id > 0 else None
-
-
-def _latest_related_terminal_event_id(
-    con: sqlite3.Connection, task_ids: list[str], *, max_event_id: int | None = None
-) -> int | None:
-    if not task_ids or not _table_exists(con, "task_events"):
-        return None
-    placeholders = ",".join("?" for _ in task_ids)
-    id_column = _task_events_id_column(con)
-    if id_column is None:
-        return None
-    row = con.execute(
-        f"""
-        select max({id_column})
-        from task_events
-        where task_id in ({placeholders})
-          and kind in ('blocked', 'gave_up', 'failed', 'completed')
-          and (? is null or {id_column} <= ?)
-        """,
-        (*task_ids, max_event_id, max_event_id),
-    ).fetchone()
-    return int(row[0]) if row and row[0] is not None else None
-
-
-def _max_event_id(con: sqlite3.Connection) -> int:
-    if not _table_exists(con, "task_events"):
-        return 0
-    id_column = _task_events_id_column(con)
-    if id_column is None:
-        return 0
-    row = con.execute(f"select max({id_column}) from task_events").fetchone()
-    return int(row[0]) if row and row[0] is not None else 0
-
-
-def _task_events_id_column(con: sqlite3.Connection) -> str | None:
-    columns = _table_columns(con, "task_events")
-    if "id" in columns:
-        return "id"
-    if "event_id" in columns:
-        return "event_id"
-    return None
-
-
-def _related_subscription_tasks(con: sqlite3.Connection, task_id: str) -> list[str]:
-    if not con.execute("select 1 from tasks where id = ?", (task_id,)).fetchone():
-        return []
-    root = _root_task_id(con, task_id)
-    related: list[str] = []
-    for candidate in (root, task_id):
-        if candidate and candidate not in related:
-            related.append(candidate)
-    return related
-
-
-def _root_task_id(con: sqlite3.Connection, task_id: str) -> str:
-    root = task_id
-    seen = {task_id}
-    frontier = [task_id]
-    while frontier and _table_exists(con, "task_links"):
-        child = frontier.pop(0)
-        rows = con.execute(
-            "select parent_id from task_links where child_id = ? order by parent_id", (child,)
-        ).fetchall()
-        if not rows:
-            continue
-        for row in rows:
-            parent = _text(row[0])
-            if not parent or parent in seen:
-                continue
-            seen.add(parent)
-            root = parent
-            frontier.append(parent)
-    return root
-
-
-def _insert_event(
-    con: sqlite3.Connection, task_id: str, kind: str, payload: dict[str, Any], now: float
-) -> None:
-    if not _table_exists(con, "task_events"):
-        return
-    con.execute(
-        "insert into task_events(task_id, kind, payload, created_at, run_id) values (?, ?, ?, ?, ?)",
-        (task_id, kind, json.dumps(payload, sort_keys=True), now, None),
-    )
-
-
-def _table_exists(con: sqlite3.Connection, name: str) -> bool:
-    return (
-        con.execute(
-            "select 1 from sqlite_master where type = 'table' and name = ?", (name,)
-        ).fetchone()
-        is not None
-    )
 
 
 def _text(value: Any) -> str:

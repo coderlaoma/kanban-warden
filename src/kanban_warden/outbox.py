@@ -1,10 +1,11 @@
-"""Bounded notification outbox delivery through native Kanban evidence."""
+"""Bounded notification outbox delivery without mutating Kanban board databases."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
 import time
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,7 @@ class OutboxDeliveryReport:
 
 
 class NotificationOutboxDrainer:
-    """Drain queued notification actions by writing observable Kanban evidence."""
+    """Drain queued notification actions while leaving board databases read-only."""
 
     def __init__(self, config: KanbanWardenConfig, state_store: WardenStateStore) -> None:
         self.config = config
@@ -110,7 +111,7 @@ class NotificationOutboxDrainer:
         db_path = board_paths.get(board_name)
         if db_path is None:
             raise _RetryableDeliveryError(f"board database not discovered for board {board_name}")
-        with sqlite3.connect(db_path) as con:
+        with _readonly_connection(db_path) as con:
             if not _table_exists(con, "tasks") or not _task_exists(con, task_id):
                 raise _RetryableDeliveryError("target task missing")
             if not _has_native_subscriber(con, task_id):
@@ -119,18 +120,6 @@ class NotificationOutboxDrainer:
             evidence_text = self._evidence_comment(row, payload)
             _assert_secret_safe(json.dumps(evidence, sort_keys=True))
             _assert_secret_safe(evidence_text)
-            if (
-                self.config.notifications.evidence_comments
-                and _table_exists(con, "task_comments")
-                and not _comment_exists(con, task_id, row["key"])
-            ):
-                _insert_comment(con, task_id, evidence_text, int(now))
-            if (
-                self.config.notifications.evidence_events
-                and _table_exists(con, "task_events")
-                and not _event_exists(con, task_id, row["key"])
-            ):
-                _insert_event(con, task_id, evidence, now)
 
     def _evidence_payload(self, row: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -178,63 +167,20 @@ def _has_native_subscriber(con: sqlite3.Connection, task_id: str) -> bool:
     return row is not None
 
 
+@contextlib.contextmanager
+def _readonly_connection(db_path: str | Path):
+    uri = f"file:{Path(db_path)}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def _task_exists(con: sqlite3.Connection, task_id: str) -> bool:
     return con.execute("select 1 from tasks where id = ? limit 1", (task_id,)).fetchone() is not None
 
 
-def _comment_exists(con: sqlite3.Connection, task_id: str, key: str) -> bool:
-    row = con.execute(
-        "select 1 from task_comments where task_id = ? and body like ? limit 1",
-        (task_id, f"%{key}%"),
-    ).fetchone()
-    return row is not None
-
-
-def _event_exists(con: sqlite3.Connection, task_id: str, key: str) -> bool:
-    row = con.execute(
-        "select 1 from task_events where task_id = ? and payload like ? limit 1",
-        (task_id, f"%{key}%"),
-    ).fetchone()
-    return row is not None
-
-
-def _insert_comment(con: sqlite3.Connection, task_id: str, body: str, now: int) -> None:
-    columns = _table_columns(con, "task_comments")
-    values: dict[str, Any] = {
-        "task_id": task_id,
-        "author": "kanban-warden",
-        "body": body,
-        "created_at": now,
-    }
-    insert_columns = [column for column in values if column in columns]
-    if not insert_columns:
-        return
-    placeholders = ", ".join("?" for _ in insert_columns)
-    con.execute(
-        f"insert into task_comments({', '.join(insert_columns)}) values ({placeholders})",
-        tuple(values[column] for column in insert_columns),
-    )
-
-
-def _insert_event(
-    con: sqlite3.Connection, task_id: str, payload: dict[str, Any], now: float
-) -> None:
-    columns = _table_columns(con, "task_events")
-    values: dict[str, Any] = {
-        "task_id": task_id,
-        "kind": "commented",
-        "payload": json.dumps(payload, sort_keys=True),
-        "created_at": now,
-        "run_id": None,
-    }
-    insert_columns = [column for column in values if column in columns]
-    if not insert_columns:
-        return
-    placeholders = ", ".join("?" for _ in insert_columns)
-    con.execute(
-        f"insert into task_events({', '.join(insert_columns)}) values ({placeholders})",
-        tuple(values[column] for column in insert_columns),
-    )
 
 
 def _table_exists(con: sqlite3.Connection, name: str) -> bool:
@@ -246,8 +192,6 @@ def _table_exists(con: sqlite3.Connection, name: str) -> bool:
     )
 
 
-def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
-    return {str(row[1]) for row in con.execute(f"pragma table_info({table})")}
 
 
 def _assert_secret_safe(text: str) -> None:

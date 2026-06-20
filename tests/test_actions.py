@@ -195,7 +195,7 @@ def test_review_required_dry_run_plans_notification_and_reviewer_without_mutatin
     assert con.execute("select count(*) from tasks where id = 'review_impl'").fetchone()[0] == 0
 
 
-def test_review_required_apply_creates_one_reviewer_with_idempotency(tmp_path: Path) -> None:
+def test_review_required_apply_queues_reviewer_without_mutating_board(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_board(board)
@@ -211,16 +211,16 @@ def test_review_required_apply_creates_one_reviewer_with_idempotency(tmp_path: P
     first = supervisor.collect(now=20)
     second = supervisor.collect(now=21)
 
-    assert any(
-        result["applied"] and result["kind"] == "create_reviewer"
-        for result in first["action_results"]
-    )
+    create_results = [
+        result for result in first["action_results"] if result["kind"] == "create_reviewer"
+    ]
+    assert create_results
+    assert all(result["applied"] is False for result in create_results)
+    assert all(result["note"] == "board-write-disabled" for result in create_results)
     con = sqlite3.connect(board)
-    assert con.execute("select count(*) from tasks where id = 'review_impl'").fetchone()[0] == 1
-    assert (
-        con.execute("select assignee from tasks where id = 'review_impl'").fetchone()[0]
-        == "reviewer"
-    )
+    assert con.execute("select count(*) from tasks where id = 'review_impl'").fetchone()[0] == 0
+    assert con.execute("select count(*) from task_events").fetchone()[0] == 1
+    assert con.execute("select count(*) from task_comments").fetchone()[0] == 0
     assert not any(
         result["applied"] and result["kind"] == "create_reviewer"
         for result in second["action_results"]
@@ -248,18 +248,17 @@ def test_review_approve_and_needs_changes_comment_and_unblock_source_once(tmp_pa
         WardenSupervisor(config, profile_name="tester").collect(now=21)
 
         con = sqlite3.connect(board)
-        expected_status = "done" if verdict == "approve" else "ready"
         assert (
             con.execute("select status from tasks where id = 'impl'").fetchone()[0]
-            == expected_status
+            == "blocked"
         )
         assert con.execute("select count(*) from task_comments where task_id = 'impl'").fetchone()[
             0
-        ] == (2 if verdict == "approve" else 1)
+        ] == 0
 
 
 
-def test_review_needs_changes_creates_dedicated_implementer_followup_and_backfills_subscription(
+def test_review_needs_changes_queues_implementer_followup_without_mutating_board(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=False)
@@ -310,35 +309,22 @@ def test_review_needs_changes_creates_dedicated_implementer_followup_and_backfil
     ]
     assert len(followup_actions) == 1
     con = sqlite3.connect(board)
-    followup = con.execute(
-        "select id, title, body, status, assignee, created_by, idempotency_key from tasks where id = ?",
-        ("fix_impl_review_impl",),
-    ).fetchone()
-    assert followup is not None
-    assert followup[1] == "Fix review changes for impl"
-    assert "NEEDS-CHANGES" in followup[2]
-    assert review_body in followup[2]
-    assert followup[3] == "ready"
-    assert followup[4] == "hairou"
-    assert followup[5] == "kanban-warden"
-    assert followup[6] == "implementer-followup:default:review_impl:impl"
+    assert con.execute("select count(*) from tasks where id = ?", ("fix_impl_review_impl",)).fetchone()[0] == 0
     assert con.execute(
         "select count(*) from task_links where parent_id = ? and child_id = ?",
         ("impl", "fix_impl_review_impl"),
-    ).fetchone()[0] == 1
+    ).fetchone()[0] == 0
     assert con.execute(
         "select count(*) from kanban_notify_subs where task_id = ?", ("fix_impl_review_impl",)
-    ).fetchone()[0] == 1
-    assert con.execute(
-        "select last_event_id from kanban_notify_subs where task_id = ?", ("fix_impl_review_impl",)
-    ).fetchone()[0] >= 2
-    assert con.execute("select count(*) from tasks where id = ?", ("fix_impl_review_impl",)).fetchone()[0] == 1
+    ).fetchone()[0] == 0
     assert not any(
         result["applied"] and result["kind"] == "create_implementer_followup"
         for result in second["action_results"]
     )
     assert any(
-        row["key"] == "implementer-followup:default:review_impl:impl" and row["status"] == "done"
+        row["key"] == "implementer-followup:default:review_impl:impl"
+        and row["status"] == "done"
+        and row["last_note"] == "board-write-disabled"
         for row in WardenStateStore(config.state_db_path or "").snapshot()["action_log"]
     )
     assert report["state"]["notification_outbox_count"] >= 1
@@ -386,13 +372,10 @@ def test_review_needs_changes_without_source_assignee_does_not_assign_followup_t
             "select 1 from tasks where id = ? and assignee = ?",
             ("fix_impl_review_impl", "reviewer"),
         ).fetchone()
-        comments = [
-            row[0] for row in con.execute("select body from task_comments where task_id = ?", ("impl",))
-        ]
-        assert any("missing implementer assignee" in body for body in comments)
+        assert con.execute("select count(*) from task_comments where task_id = ?", ("impl",)).fetchone()[0] == 0
         assert any(
             result["kind"] == "create_implementer_followup"
-            and result["note"] == "missing-implementer-assignee"
+            and result["note"] == "board-write-disabled"
             for result in report["action_results"]
         )
 
@@ -426,16 +409,18 @@ def test_review_needs_changes_uses_configured_implementer_fallback_not_reviewer(
         4,
     )
 
-    WardenSupervisor(config, profile_name="tester").collect(now=20)
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
 
     con = sqlite3.connect(board)
-    followup = con.execute(
-        "select assignee, status from tasks where id = ?", ("fix_impl_review_impl",)
-    ).fetchone()
-    assert followup == ("hairou", "ready")
+    assert con.execute("select count(*) from tasks where id = ?", ("fix_impl_review_impl",)).fetchone()[0] == 0
+    assert any(
+        result["kind"] == "create_implementer_followup"
+        and result["note"] == "board-write-disabled"
+        for result in report["action_results"]
+    )
 
 
-def test_manual_review_needs_changes_identifies_source_from_body_and_dispatches_fix_card(
+def test_manual_review_needs_changes_identifies_source_from_body_and_queues_fix_card(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=False)
@@ -502,33 +487,23 @@ def test_manual_review_needs_changes_identifies_source_from_body_and_dispatches_
     )
     con = sqlite3.connect(board)
     followup_id = "fix_t_041385e0_t_e0b9905c"
-    followup = con.execute(
-        "select title, body, status, assignee, created_by, idempotency_key from tasks where id = ?",
-        (followup_id,),
-    ).fetchone()
-    assert followup is not None
-    assert followup[0] == "Fix review changes for t_041385e0"
-    assert review_body in followup[1]
-    assert followup[2] == "ready"
-    assert followup[3] == "mabu"
-    assert followup[4] == "kanban-warden"
-    assert followup[5] == "implementer-followup:default:t_e0b9905c:t_041385e0"
+    assert con.execute("select count(*) from tasks where id = ?", (followup_id,)).fetchone()[0] == 0
     assert con.execute(
         "select count(*) from task_links where parent_id = ? and child_id = ?",
         ("t_041385e0", followup_id),
-    ).fetchone()[0] == 1
+    ).fetchone()[0] == 0
     assert con.execute(
         "select platform, chat_id, thread_id, notifier_profile, last_event_id from kanban_notify_subs where task_id = ?",
         (followup_id,),
-    ).fetchone() == ("telegram", "chat-1", "thread-1", "mabu", 2)
+    ).fetchone() is None
     assert con.execute(
         "select count(*) from task_events where task_id = ? and kind = ?", (followup_id, "created")
-    ).fetchone()[0] == 1
+    ).fetchone()[0] == 0
     assert not any(
         result["applied"] and result["kind"] == "create_implementer_followup"
         for result in second["action_results"]
     )
-    assert con.execute("select count(*) from tasks where id = ?", (followup_id,)).fetchone()[0] == 1
+    assert con.execute("select count(*) from tasks where id = ?", (followup_id,)).fetchone()[0] == 0
 
 
 def test_manual_review_needs_changes_without_clear_source_context_creates_no_fix_card(
@@ -642,7 +617,7 @@ def test_stale_running_retry_budget_escalates_after_retries(tmp_path: Path) -> N
     )
 
 
-def test_real_schema_create_reviewer_populates_required_task_columns(tmp_path: Path) -> None:
+def test_real_schema_create_reviewer_is_recorded_without_board_insert(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
@@ -654,16 +629,18 @@ def test_real_schema_create_reviewer_populates_required_task_columns(tmp_path: P
     con.close()
     _event(board, "impl", "blocked", {"reason": "review-required: check diff"}, 2)
 
-    WardenSupervisor(config, profile_name="tester").collect(now=20)
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
 
     con = sqlite3.connect(board)
-    row = con.execute(
-        "select assignee, status, workspace_kind, created_by, idempotency_key from tasks where id = 'review_impl'"
-    ).fetchone()
-    assert row == ("reviewer", "ready", "scratch", "kanban-warden", "reviewer:default:impl")
+    assert con.execute("select count(*) from tasks where id = 'review_impl'").fetchone()[0] == 0
+    assert any(
+        result["kind"] == "create_reviewer"
+        and result["note"] == "board-write-disabled"
+        for result in report["action_results"]
+    )
 
 
-def test_real_schema_comment_paths_populate_required_author_column(tmp_path: Path) -> None:
+def test_real_schema_comment_paths_are_recorded_without_board_comments(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False, max_retries=0)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
@@ -689,11 +666,18 @@ def test_real_schema_comment_paths_populate_required_author_column(tmp_path: Pat
     supervisor.collect(now=21)
 
     con = sqlite3.connect(board)
-    comments = con.execute("select task_id, author, body from task_comments order by id").fetchall()
-    assert {row[0] for row in comments} == {"impl", "stale"}
-    assert {row[1] for row in comments} == {"kanban-warden"}
-    assert any("warden-review-needs-changes" in row[2] for row in comments)
-    assert any("retry budget exhausted" in row[2] for row in comments)
+    assert con.execute("select count(*) from task_comments").fetchone()[0] == 0
+    state = WardenStateStore(config.state_db_path or "").snapshot()
+    assert any(
+        row["key"].startswith("review-needs-changes:")
+        and row["last_note"] == "board-write-disabled"
+        for row in state["action_log"]
+    )
+    assert any(
+        row["key"].endswith(":escalate:stale-running")
+        and row["last_note"] == "board-write-disabled"
+        for row in state["action_log"]
+    )
 
 
 def test_blocked_child_event_ensures_root_and_child_subscriptions_idempotently(
@@ -746,7 +730,8 @@ def test_blocked_child_event_ensures_root_and_child_subscriptions_idempotently(
     supervisor.collect(now=21)
 
     assert any(
-        result["applied"] and result["kind"] == "ensure_subscription"
+        result["kind"] == "ensure_subscription"
+        and result["note"] == "board-write-disabled"
         for result in first["action_results"]
     )
     con = sqlite3.connect(board)
@@ -754,14 +739,12 @@ def test_blocked_child_event_ensures_root_and_child_subscriptions_idempotently(
         "select task_id, platform, chat_id, thread_id, user_id, notifier_profile, last_event_id from kanban_notify_subs order by task_id"
     ).fetchall()
     assert rows == [
-        ("child", "weixin", "chat-1", "", "user-1", "default", 3),
         ("root", "weixin", "chat-1", "", "user-1", "default", 7),
     ]
-    assert con.execute("select count(*) from kanban_notify_subs").fetchone()[0] == 2
-    payload = con.execute(
+    assert con.execute("select count(*) from kanban_notify_subs").fetchone()[0] == 1
+    assert con.execute(
         "select payload from task_events where task_id = 'child' and kind = 'commented'"
-    ).fetchone()[0]
-    assert "ensured root/stuck-task notify subscriptions" in payload
+    ).fetchone() is None
 
 
 def test_dependency_deadlock_health_surfaces_child_and_ensures_subscription(tmp_path: Path) -> None:
@@ -832,20 +815,18 @@ def test_ensure_subscription_cursor_exposes_only_current_stuck_event(tmp_path: P
     first = WardenSupervisor(config, profile_name="tester").collect(now=20)
 
     assert any(
-        result["applied"] and result["kind"] == "ensure_subscription"
+        result["kind"] == "ensure_subscription"
+        and result["note"] == "board-write-disabled"
         for result in first["action_results"]
     )
     con = sqlite3.connect(board)
-    current_event_id = con.execute(
-        "select max(id) from task_events where task_id = 'child' and kind in ('blocked', 'gave_up')"
-    ).fetchone()[0]
-    child_cursor = con.execute(
-        "select last_event_id from kanban_notify_subs where task_id = 'child'"
-    ).fetchone()[0]
-    assert child_cursor == current_event_id - 1
+    assert (
+        con.execute("select count(*) from kanban_notify_subs where task_id = 'child'").fetchone()[0]
+        == 0
+    )
 
 
-def test_ensure_subscription_no_source_health_finding_is_retryable_when_source_appears(
+def test_ensure_subscription_no_source_health_finding_records_proposal_without_board_write(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=False)
@@ -881,7 +862,7 @@ def test_ensure_subscription_no_source_health_finding_is_retryable_when_source_a
     first = supervisor.collect(now=20)
     assert any(
         result["kind"] == "ensure_subscription"
-        and result["note"] == "no-related-subscription-source"
+        and result["note"] == "board-write-disabled"
         for result in first["action_results"]
     )
 
@@ -893,14 +874,15 @@ def test_ensure_subscription_no_source_health_finding_is_retryable_when_source_a
     con.close()
 
     second = supervisor.collect(now=31)
-    assert any(
-        result["applied"] and result["kind"] == "ensure_subscription"
+    assert all(
+        result["note"] in {"board-write-disabled", "duplicate"}
         for result in second["action_results"]
+        if result["kind"] == "ensure_subscription"
     )
     con = sqlite3.connect(board)
     assert (
         con.execute("select count(*) from kanban_notify_subs where task_id = 'child'").fetchone()[0]
-        == 1
+        == 0
     )
 
 
@@ -939,12 +921,16 @@ def test_review_approve_finalizes_source_when_review_child_is_done(tmp_path: Pat
 
     assert any(action["kind"] == "finalize" for action in report["planned_actions"])
     con = sqlite3.connect(board)
-    assert con.execute("select status from tasks where id = ?", ("impl",)).fetchone()[0] == "done"
+    assert con.execute("select status from tasks where id = ?", ("impl",)).fetchone()[0] == "blocked"
     assert (
         con.execute(
             "select count(*) from task_events where task_id = ? and kind = ?", ("impl", "completed")
         ).fetchone()[0]
-        == 1
+        == 0
+    )
+    assert any(
+        result["kind"] == "finalize" and result["note"] == "board-write-disabled"
+        for result in report["action_results"]
     )
 
 
@@ -980,9 +966,14 @@ def test_blocker_done_promotes_blocked_downstream_and_root_all_children_done_fin
     con = sqlite3.connect(board)
     assert (
         con.execute("select status from tasks where id = ?", ("downstream",)).fetchone()[0]
-        == "ready"
+        == "blocked"
     )
-    assert con.execute("select status from tasks where id = ?", ("root",)).fetchone()[0] == "done"
+    assert con.execute("select status from tasks where id = ?", ("root",)).fetchone()[0] == "blocked"
+    assert any(
+        result["kind"] in {"promote", "finalize"}
+        and result["note"] == "board-write-disabled"
+        for result in report["action_results"]
+    )
 
 
 def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: Path) -> None:
@@ -1011,7 +1002,7 @@ def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: 
     assert report["state"]["notification_outbox_count"] >= 1
 
 
-def test_stale_running_health_also_repairs_subscription_and_queues_notification(
+def test_stale_running_health_records_subscription_proposal_and_queues_notification(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=False, max_retries=1)
@@ -1059,7 +1050,7 @@ def test_stale_running_health_also_repairs_subscription_and_queues_notification(
         con.execute(
             "select count(*) from kanban_notify_subs where task_id = ?", ("stale",)
         ).fetchone()[0]
-        == 1
+        == 0
     )
 
 
@@ -1096,7 +1087,7 @@ def test_notification_outbox_stale_in_progress_rows_are_reclaimed(tmp_path: Path
     ).fetchone() == ("delivered", 1, None, None)
 
 
-def test_notification_outbox_drain_delivers_to_native_subscriber_evidence(
+def test_notification_outbox_drain_delivers_to_native_subscriber_without_board_evidence(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=False)
@@ -1143,12 +1134,11 @@ def test_notification_outbox_drain_delivers_to_native_subscriber_evidence(
         "select payload from task_events where task_id = ? and kind = ?",
         ("impl", "commented"),
     ).fetchall()
-    assert len(evidence_events) >= 1
-    assert any("warden-notification-delivered" in row[0] for row in evidence_events)
+    assert evidence_events == []
     comments = board_con.execute(
         "select author, body from task_comments where task_id = ? order by id", ("impl",)
     ).fetchall()
-    assert any(row[0] == "kanban-warden" and "warden-notification" in row[1] for row in comments)
+    assert comments == []
 
 
 def test_notification_outbox_no_subscriber_retries_with_backoff_then_exhausts(

@@ -10,6 +10,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from .sqlite_utils import managed_connection
+
 
 @dataclass(frozen=True)
 class LockStatus:
@@ -90,7 +92,7 @@ class LeaderLock:
         return sqlite3.connect(self.db_path, timeout=10)
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with managed_connection(self.db_path, timeout=10) as conn:
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS locks ("
                 "name TEXT PRIMARY KEY, "
@@ -98,3 +100,4 @@ class LeaderLock:
                 "expires_at REAL NOT NULL, "
                 "heartbeat_at REAL NOT NULL)"
             )
+

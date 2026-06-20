@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .sqlite_utils import managed_connection
+
 
 class WardenStateStore:
     """Small SQLite store for cursors, idempotency keys, retries, and runtime metadata."""
@@ -278,9 +280,14 @@ class WardenStateStore:
             ]
             processed_count = int(con.execute("select count(*) from processed_keys").fetchone()[0])
             action_rows = [
-                {"key": str(row[0]), "status": str(row[1]), "attempts": int(row[2])}
+                {
+                    "key": str(row[0]),
+                    "status": str(row[1]),
+                    "attempts": int(row[2]),
+                    "last_note": str(row[3]),
+                }
                 for row in con.execute(
-                    "select key, status, attempts from action_log order by updated_at desc, key limit 50"
+                    "select key, status, attempts, note from action_log order by updated_at desc, key limit 50"
                 )
             ]
             outbox_count = int(con.execute("select count(*) from notification_outbox").fetchone()[0])
@@ -323,7 +330,7 @@ class WardenStateStore:
         return con
 
     def _init_db(self) -> None:
-        with sqlite3.connect(self.db_path) as con:
+        with managed_connection(self.db_path) as con:
             con.executescript(
                 """
                 create table if not exists board_cursors (

@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from .sqlite_utils import managed_connection
 from .state import WardenStateStore
 
 
@@ -133,7 +134,7 @@ def analyze_health(
     if not _looks_like_board_db(path):
         return []
     findings: list[dict[str, Any]] = []
-    with sqlite3.connect(path) as con:
+    with managed_connection(path) as con:
         con.row_factory = sqlite3.Row
         if _has_table(con, "tasks"):
             rows = _safe_select(
@@ -349,7 +350,7 @@ def _read_events(
         return []
     op = ">=" if newest else ">"
     order = "desc" if newest else "asc"
-    with sqlite3.connect(db_path) as con:
+    with managed_connection(db_path) as con:
         con.row_factory = sqlite3.Row
         rows = _safe_select(
             con,
@@ -399,7 +400,7 @@ def _looks_like_board_db(path: Path) -> bool:
     if not path.is_file():
         return False
     try:
-        with sqlite3.connect(path) as con:
+        with managed_connection(path) as con:
             return _has_table(con, "task_events")
     except sqlite3.Error:
         return False
@@ -491,3 +492,4 @@ def _row_int_optional(row: sqlite3.Row, key: str | int) -> int | None:
 def _row_float(row: sqlite3.Row, key: str | int) -> float | None:
     value = row[key]
     return float(value) if value is not None else None
+

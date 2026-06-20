@@ -91,7 +91,7 @@ def test_dry_run_reports_recovery_deadlock_without_mutating(tmp_path: Path) -> N
     assert con.execute("select name from sqlite_master where name = 'kanban_warden_action_log'").fetchone() is None
 
 
-def test_auto_advance_unlinks_deadlock_promotes_child_and_logs_once(tmp_path: Path) -> None:
+def test_auto_advance_reports_deadlock_without_mutating_board(tmp_path: Path) -> None:
     db_path = tmp_path / "kanban.db"
     _init_board(db_path)
     con = sqlite3.connect(db_path)
@@ -112,14 +112,14 @@ def test_auto_advance_unlinks_deadlock_promotes_child_and_logs_once(tmp_path: Pa
         )
         conn.commit()
 
-    assert [proposal.status for proposal in first.proposals] == ["applied"]
-    assert second.proposals == []
+    assert [proposal.status for proposal in first.proposals] == ["proposed"]
+    assert [proposal.status for proposal in second.proposals] == ["proposed"]
 
     con = sqlite3.connect(db_path)
-    assert con.execute("select count(*) from task_links").fetchone()[0] == 0
-    assert con.execute("select status from tasks where id = 'fix'").fetchone()[0] == "ready"
-    assert con.execute("select count(*) from kanban_warden_action_log").fetchone()[0] == 1
-    assert con.execute("select count(*) from task_comments").fetchone()[0] == 2
+    assert con.execute("select count(*) from task_links").fetchone()[0] == 1
+    assert con.execute("select status from tasks where id = 'fix'").fetchone()[0] == "todo"
+    assert con.execute("select name from sqlite_master where name = 'kanban_warden_action_log'").fetchone() is None
+    assert con.execute("select count(*) from task_comments").fetchone()[0] == 0
 
 
 def test_brand_new_fix_card_without_claim_rejection_or_staleness_is_not_unlinked(tmp_path: Path) -> None:
@@ -162,7 +162,7 @@ def test_stale_todo_with_all_parents_done_is_promoted_but_parentless_todo_is_ign
 
     assert [proposal.action_type for proposal in report.proposals] == ["promote_stale_todo"]
     con = sqlite3.connect(db_path)
-    assert con.execute("select status from tasks where id = 'child'").fetchone()[0] == "ready"
+    assert con.execute("select status from tasks where id = 'child'").fetchone()[0] == "todo"
     assert con.execute("select status from tasks where id = 'orphan'").fetchone()[0] == "todo"
 
 
