@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import time
@@ -239,6 +240,182 @@ class WardenStateStore:
                 (status, error[:1000], next_attempt_at if not exhausted else None, now, key),
             )
 
+    def record_loop_trace(
+        self,
+        *,
+        board_name: str,
+        task_id: str,
+        profile_name: str,
+        loop_state: str,
+        observed_facts: dict[str, Any],
+        matched_policy: str,
+        decision: str,
+        confidence: str,
+        planned_action: dict[str, Any],
+        verification_contract: dict[str, Any],
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if created_at is None else created_at
+        seed = {
+            "board_name": board_name,
+            "task_id": task_id,
+            "profile_name": profile_name,
+            "loop_state": loop_state,
+            "matched_policy": matched_policy,
+            "decision": decision,
+            "planned_action": planned_action,
+            "created_at": now,
+        }
+        trace_id = _loop_trace_id(seed, now)
+        with self._connect() as con:
+            con.execute(
+                """
+                insert or ignore into loop_trace(
+                  trace_id, board_name, task_id, profile_name, loop_state,
+                  observed_facts_json, matched_policy, decision, confidence,
+                  planned_action_json, verification_contract_json, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trace_id,
+                    board_name,
+                    task_id,
+                    profile_name,
+                    loop_state,
+                    json.dumps(observed_facts, sort_keys=True),
+                    matched_policy,
+                    decision,
+                    confidence,
+                    json.dumps(planned_action, sort_keys=True),
+                    json.dumps(verification_contract, sort_keys=True),
+                    now,
+                ),
+            )
+        return {
+            "trace_id": trace_id,
+            "board_name": board_name,
+            "task_id": task_id,
+            "profile_name": profile_name,
+            "loop_state": loop_state,
+            "observed_facts": observed_facts,
+            "matched_policy": matched_policy,
+            "decision": decision,
+            "confidence": confidence,
+            "planned_action": planned_action,
+            "verification_contract": verification_contract,
+            "created_at": now,
+        }
+
+    def record_loop_outcome(
+        self,
+        *,
+        trace_id: str,
+        board_name: str,
+        task_id: str,
+        action_type: str,
+        status: str,
+        verification_status: str,
+        human_override: bool = False,
+        override_reason: str = "",
+        latency_seconds: float = 0.0,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if created_at is None else created_at
+        with self._connect() as con:
+            con.execute(
+                """
+                insert or ignore into loop_outcome(
+                  trace_id, board_name, task_id, action_type, status,
+                  verification_status, human_override, override_reason,
+                  latency_seconds, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trace_id,
+                    board_name,
+                    task_id,
+                    action_type,
+                    status,
+                    verification_status,
+                    int(human_override),
+                    override_reason,
+                    latency_seconds,
+                    now,
+                ),
+            )
+        return {
+            "trace_id": trace_id,
+            "board_name": board_name,
+            "task_id": task_id,
+            "action_type": action_type,
+            "status": status,
+            "verification_status": verification_status,
+            "human_override": human_override,
+            "override_reason": override_reason,
+            "latency_seconds": latency_seconds,
+            "created_at": now,
+        }
+
+    def recent_loop_traces(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                select trace_id, board_name, task_id, profile_name, loop_state,
+                       observed_facts_json, matched_policy, decision, confidence,
+                       planned_action_json, verification_contract_json, created_at
+                from loop_trace
+                order by created_at desc, trace_id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "trace_id": str(row[0]),
+                "board_name": str(row[1]),
+                "task_id": str(row[2]),
+                "profile_name": str(row[3]),
+                "loop_state": str(row[4]),
+                "observed_facts": _json_object(row[5]),
+                "matched_policy": str(row[6]),
+                "decision": str(row[7]),
+                "confidence": str(row[8]),
+                "planned_action": _json_object(row[9]),
+                "verification_contract": _json_object(row[10]),
+                "created_at": float(row[11]),
+            }
+            for row in rows
+        ]
+
+    def recent_loop_outcomes(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                select trace_id, board_name, task_id, action_type, status,
+                       verification_status, human_override, override_reason,
+                       latency_seconds, created_at
+                from loop_outcome
+                order by created_at desc, trace_id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "trace_id": str(row[0]),
+                "board_name": str(row[1]),
+                "task_id": str(row[2]),
+                "action_type": str(row[3]),
+                "status": str(row[4]),
+                "verification_status": str(row[5]),
+                "human_override": bool(row[6]),
+                "override_reason": str(row[7]),
+                "latency_seconds": float(row[8]),
+                "created_at": float(row[9]),
+            }
+            for row in rows
+        ]
+
     def set_runtime_metadata(self, key: str, value: dict[str, Any]) -> None:
         with self._connect() as con:
             con.execute(
@@ -314,6 +491,10 @@ class WardenStateStore:
                     """
                 )
             ]
+            loop_trace_count = int(con.execute("select count(*) from loop_trace").fetchone()[0])
+            loop_outcome_count = int(
+                con.execute("select count(*) from loop_outcome").fetchone()[0]
+            )
         return {
             "cursors": cursors,
             "processed_key_count": processed_count,
@@ -322,6 +503,10 @@ class WardenStateStore:
             "notification_outbox_count": outbox_count,
             "notification_outbox_by_status": outbox_by_status,
             "notification_outbox_recent": outbox_recent,
+            "loop_trace_count": loop_trace_count,
+            "loop_outcome_count": loop_outcome_count,
+            "loop_traces_recent": self.recent_loop_traces(limit=20),
+            "loop_outcomes_recent": self.recent_loop_outcomes(limit=20),
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -373,6 +558,33 @@ class WardenStateStore:
                   updated_at real not null,
                   next_attempt_at real
                 );
+                create table if not exists loop_trace (
+                  trace_id text primary key,
+                  board_name text not null,
+                  task_id text not null,
+                  profile_name text not null,
+                  loop_state text not null,
+                  observed_facts_json text not null,
+                  matched_policy text not null,
+                  decision text not null,
+                  confidence text not null,
+                  planned_action_json text not null,
+                  verification_contract_json text not null,
+                  created_at real not null
+                );
+                create table if not exists loop_outcome (
+                  trace_id text not null,
+                  board_name text not null,
+                  task_id text not null,
+                  action_type text not null,
+                  status text not null,
+                  verification_status text not null,
+                  human_override integer not null default 0,
+                  override_reason text not null default '',
+                  latency_seconds real not null default 0,
+                  created_at real not null,
+                  primary key (trace_id, action_type, status, verification_status, created_at)
+                );
                 """
             )
             columns = {
@@ -380,3 +592,15 @@ class WardenStateStore:
             }
             if "next_attempt_at" not in columns:
                 con.execute("alter table notification_outbox add column next_attempt_at real")
+
+
+def _json_object(raw: Any) -> dict[str, Any]:
+    value = json.loads(str(raw))
+    return value if isinstance(value, dict) else {}
+
+
+def _loop_trace_id(seed: dict[str, Any], created_at: float) -> str:
+    digest = hashlib.sha256(
+        json.dumps(seed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"loop-trace:{int(created_at * 1000)}:{digest}"

@@ -11,7 +11,7 @@ import threading
 import time
 from typing import Any
 
-from .actions import KanbanActionEngine
+from .actions import KanbanActionEngine, PlannedAction
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
 from .cleanup import StateCleanupConfig, execute_cleanup_plan, plan_cleanup, prune_state_store
 from .config import BoardDatabase, KanbanWardenConfig, discover_board_databases
@@ -112,6 +112,7 @@ class WardenSupervisor:
         health: list[dict[str, Any]] = []
         planned_actions: list[dict[str, Any]] = []
         action_results: list[dict[str, Any]] = []
+        loop_traces: list[dict[str, Any]] = []
         board_paths: dict[str, str] = {}
         for board in boards:
             board_paths[board.name] = str(board.db_path)
@@ -141,6 +142,11 @@ class WardenSupervisor:
                     relationships[f"{board.name}:{event.task_id}"] = event.relationship.to_dict()
             event_actions = self.action_engine.plan_for_events(events)
             planned_actions.extend(action.to_dict() for action in event_actions)
+            loop_traces.extend(
+                self._record_loop_trace_for_action(action, created_at=current_time)
+                for action in event_actions
+                if _is_traceworthy_action(action)
+            )
             action_results.extend(
                 result.to_dict()
                 for result in self.action_engine.apply(board.db_path, event_actions)
@@ -155,6 +161,11 @@ class WardenSupervisor:
             health.extend(board_health)
             health_actions = self.action_engine.plan_for_health(board_health)
             planned_actions.extend(action.to_dict() for action in health_actions)
+            loop_traces.extend(
+                self._record_loop_trace_for_action(action, created_at=current_time)
+                for action in health_actions
+                if _is_traceworthy_action(action)
+            )
             action_results.extend(
                 result.to_dict()
                 for result in self.action_engine.apply(board.db_path, health_actions)
@@ -167,6 +178,7 @@ class WardenSupervisor:
             "recent_events": recent_events,
             "relationships": list(relationships.values()),
             "health": health,
+            "loop_traces": loop_traces,
             "planned_actions": planned_actions,
             "action_results": action_results,
             "outbox_delivery": outbox_delivery,
@@ -176,6 +188,37 @@ class WardenSupervisor:
             "last_collect", {"at": current_time, "boards": [b["name"] for b in board_reports]}
         )
         return report
+
+    def _record_loop_trace_for_action(
+        self, action: PlannedAction, *, created_at: float
+    ) -> dict[str, Any]:
+        trace = self.state_store.record_loop_trace(
+            board_name=action.board_name,
+            task_id=action.task_id or "",
+            profile_name=self.profile_name,
+            loop_state=_loop_state_for_action(action),
+            observed_facts={
+                "reason": action.reason,
+                "action_kind": action.kind,
+                "target_task_id": action.target_task_id,
+            },
+            matched_policy=_matched_policy_for_action(action),
+            decision=action.kind,
+            confidence=_confidence_for_action(action),
+            planned_action=action.to_dict(),
+            verification_contract=_verification_contract_for_action(action),
+            created_at=created_at,
+        )
+        self.state_store.record_loop_outcome(
+            trace_id=trace["trace_id"],
+            board_name=action.board_name,
+            task_id=action.task_id or "",
+            action_type=action.kind,
+            status="planned" if action.dry_run else "pending_apply",
+            verification_status="pending",
+            created_at=created_at,
+        )
+        return trace
 
     def dry_run(self, *, now: float | None = None) -> dict[str, Any]:
         return self.collect(now=now)
@@ -351,6 +394,60 @@ def _default_lock_path(config: KanbanWardenConfig) -> str:
     if config.leader_lock.db_path:
         return config.leader_lock.db_path
     return str(config.profile_home_path() / "kanban-warden" / "leader-lock.db")
+
+
+def _is_traceworthy_action(action: PlannedAction) -> bool:
+    return action.kind in {
+        "create_reviewer",
+        "create_implementer_followup",
+        "unblock",
+        "promote",
+        "finalize",
+        "retry",
+        "escalate",
+    }
+
+
+def _loop_state_for_action(action: PlannedAction) -> str:
+    if action.kind == "create_reviewer":
+        return "waiting_for_review"
+    if action.kind == "create_implementer_followup":
+        return "waiting_for_worker"
+    if action.kind in {"retry", "escalate"}:
+        return "no_progress"
+    return "action_planned" if action.dry_run else "verifying_action"
+
+
+def _matched_policy_for_action(action: PlannedAction) -> str:
+    if action.kind == "create_reviewer":
+        return "review_required"
+    if action.kind == "create_implementer_followup":
+        return "review_needs_changes"
+    if action.kind in {"retry", "escalate"}:
+        return "bounded_recovery"
+    return action.reason.replace(" ", "_")[:80] or action.kind
+
+
+def _confidence_for_action(action: PlannedAction) -> str:
+    if action.kind in {"create_reviewer", "unblock", "finalize"}:
+        return "high"
+    return "medium"
+
+
+def _verification_contract_for_action(action: PlannedAction) -> dict[str, Any]:
+    if action.kind == "create_reviewer":
+        return {"success": "reviewer_card_exists", "target_task_id": action.target_task_id}
+    if action.kind == "create_implementer_followup":
+        return {"success": "implementer_followup_exists"}
+    if action.kind == "unblock":
+        return {"success": "source_card_unblocked"}
+    if action.kind == "finalize":
+        return {"success": "source_card_closed"}
+    if action.kind == "retry":
+        return {"success": "new_progress_event_or_status_change"}
+    if action.kind == "escalate":
+        return {"success": "human_ack_or_manual_update"}
+    return {"success": "action_observable_on_next_sweep"}
 
 
 def install_signal_handlers(supervisor: WardenSupervisor) -> None:
