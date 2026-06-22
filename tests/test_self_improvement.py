@@ -509,6 +509,89 @@ def test_self_improvement_review_packet_requires_passed_verification(tmp_path: P
         )
 
 
+def test_self_improvement_records_approved_human_review_decision(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+
+    decision = SelfImprovementEngine(store).record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=106.0,
+    )
+
+    assert decision == {
+        "proposal_id": draft["proposal_id"],
+        "reviewer": "lead",
+        "decision": "approved",
+        "reason": "Reviewed evidence and verification.",
+        "branch_url": "https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        "pull_request_url": "https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+    }
+    audit = store.recent_improvement_audit()[0]
+    assert audit["event_type"] == "human_review_approved"
+    assert audit["payload"] == decision
+
+
+def test_self_improvement_records_rejected_human_review_decision(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+
+    decision = SelfImprovementEngine(store).record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="rejected",
+        reason="Evidence is not strong enough.",
+        created_at=106.0,
+    )
+
+    assert decision["decision"] == "rejected"
+    assert decision["branch_url"] == ""
+    assert decision["pull_request_url"] == ""
+    assert store.recent_improvement_audit()[0]["event_type"] == "human_review_rejected"
+
+
+def test_self_improvement_review_decision_requires_requested_review(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101"],
+        supporting_outcome_ids=["outcome-101"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    draft = SelfImprovementEngine(store).create_code_change_drafts(created_at=101.0)[0]
+
+    with pytest.raises(ValueError, match="human review request"):
+        SelfImprovementEngine(store).record_human_review_decision(
+            proposal_id=draft["proposal_id"],
+            reviewer="lead",
+            decision="approved",
+            reason="No review packet yet.",
+            created_at=102.0,
+        )
+
+
+def test_self_improvement_review_decision_rejects_unknown_decision(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+
+    with pytest.raises(ValueError, match="approved or rejected"):
+        SelfImprovementEngine(store).record_human_review_decision(
+            proposal_id=draft["proposal_id"],
+            reviewer="lead",
+            decision="needs_changes",
+            reason="Unsupported state.",
+            created_at=106.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(
@@ -538,3 +621,48 @@ def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> No
             reason="Wrong level.",
             created_at=101.0,
         )
+
+
+def _prepare_requested_human_review(store: WardenStateStore) -> dict[str, object]:
+    store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101", "trace-117"],
+        supporting_outcome_ids=["outcome-101", "outcome-117"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    engine = SelfImprovementEngine(store)
+    draft = engine.create_code_change_drafts(created_at=101.0)[0]
+    engine.record_code_change_approval(
+        proposal_id=str(draft["proposal_id"]),
+        actor="hairou",
+        allowed_repository="coderlaoma/hermes-kanban-warden",
+        allowed_branch_prefix="warden/improve-",
+        verification_commands=draft["patch"]["verification_commands"],
+        reason="Approved to prepare implementation package only.",
+        created_at=102.0,
+    )
+    engine.prepare_code_change_package(proposal_id=str(draft["proposal_id"]), created_at=103.0)
+    engine.record_code_change_verification(
+        proposal_id=str(draft["proposal_id"]),
+        actor="kanban-warden",
+        command_results=[
+            {
+                "command": "uv run pytest tests/test_board_events.py -q",
+                "exit_code": 0,
+                "output": "12 passed",
+            },
+            {"command": "uv run ruff check .", "exit_code": 0, "output": "All checks passed!"},
+            {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+        ],
+        created_at=104.0,
+    )
+    engine.prepare_human_review_packet(
+        proposal_id=str(draft["proposal_id"]),
+        actor="kanban-warden",
+        created_at=105.0,
+    )
+    return draft

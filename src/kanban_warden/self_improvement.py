@@ -258,6 +258,41 @@ class SelfImprovementEngine:
         )
         return packet
 
+    def record_human_review_decision(
+        self,
+        *,
+        proposal_id: str,
+        reviewer: str,
+        decision: str,
+        reason: str,
+        branch_url: str = "",
+        pull_request_url: str = "",
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record human review")
+        if self._audit_payload(proposal_id, "human_review_requested") is None:
+            raise ValueError("human review request must be prepared before recording a decision")
+        if decision not in {"approved", "rejected"}:
+            raise ValueError("human review decision must be approved or rejected")
+        review = {
+            "proposal_id": proposal_id,
+            "reviewer": reviewer,
+            "decision": decision,
+            "reason": reason,
+            "branch_url": branch_url,
+            "pull_request_url": pull_request_url,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type=f"human_review_{decision}",
+            actor=reviewer,
+            payload=review,
+            created_at=created_at,
+        )
+        return review
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:
