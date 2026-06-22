@@ -143,6 +143,53 @@ class SelfImprovementEngine:
         )
         return package
 
+    def record_code_change_verification(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        command_results: list[dict[str, Any]],
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record verification")
+        if not self._is_package_prepared(proposal_id):
+            raise ValueError("code-change package must be prepared before verification is recorded")
+        expected_commands = _string_list(proposal["patch"].get("verification_commands", []))
+        normalized_results = [_command_result(result) for result in command_results]
+        if [result["command"] for result in normalized_results] != expected_commands:
+            raise ValueError("verification commands must match the prepared package")
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="verification_started",
+            actor=actor,
+            payload={"commands": expected_commands, "result_count": len(normalized_results)},
+            created_at=created_at,
+        )
+        failed_commands = [
+            str(result["command"]) for result in normalized_results if result["exit_code"] != 0
+        ]
+        status = "failed" if failed_commands else "passed"
+        verification = {
+            "proposal_id": proposal_id,
+            "status": status,
+            "failed_commands": failed_commands,
+            "command_results": normalized_results,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type=f"verification_{status}",
+            actor=actor,
+            payload={
+                "status": status,
+                "failed_commands": failed_commands,
+                "command_results": normalized_results,
+            },
+            created_at=created_at,
+        )
+        return verification
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:
@@ -168,6 +215,15 @@ class SelfImprovementEngine:
     def _is_approved(self, proposal_id: str) -> bool:
         for approval in self.state_store.recent_improvement_approvals(limit=1000):
             if approval["proposal_id"] == proposal_id and approval["decision"] == "approved":
+                return True
+        return False
+
+    def _is_package_prepared(self, proposal_id: str) -> bool:
+        for audit in self.state_store.recent_improvement_audit(limit=1000):
+            if (
+                audit["subject_id"] == proposal_id
+                and audit["event_type"] == "code_change_package_prepared"
+            ):
                 return True
         return False
 
@@ -221,6 +277,14 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value]
+
+
+def _command_result(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "command": str(value.get("command", "")),
+        "exit_code": int(value.get("exit_code", 1)),
+        "output": str(value.get("output", ""))[:2000],
+    }
 
 
 def _commit_message(proposal: dict[str, Any], verification_commands: list[str]) -> str:
