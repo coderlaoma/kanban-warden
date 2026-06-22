@@ -82,6 +82,11 @@ class SelfImprovementEngine:
         proposal = self._proposal_by_id(proposal_id)
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can be approved with this method")
+        branch_name = str(proposal["patch"].get("branch_name", ""))
+        if not branch_name.startswith(allowed_branch_prefix):
+            raise ValueError("approval branch prefix must match the proposal branch")
+        if verification_commands != proposal["patch"].get("verification_commands", []):
+            raise ValueError("approval verification commands must match the proposal")
         approval = self.state_store.record_improvement_approval(
             proposal_id=proposal_id,
             actor=actor,
@@ -104,6 +109,40 @@ class SelfImprovementEngine:
         )
         return approval
 
+    def prepare_code_change_package(
+        self, *, proposal_id: str, created_at: float | None = None
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can be packaged")
+        if not self._is_approved(proposal_id):
+            raise ValueError("code-change package can only be prepared after it is approved")
+        patch = proposal["patch"]
+        verification_commands = _string_list(patch.get("verification_commands", []))
+        package = {
+            "proposal_id": proposal_id,
+            "branch_name": str(patch.get("branch_name", "")),
+            "affected_files": _string_list(patch.get("affected_files", [])),
+            "verification_commands": verification_commands,
+            "mutates_source": False,
+            "commit_message": _commit_message(proposal, verification_commands),
+            "pull_request_title": str(proposal["title"]),
+            "pull_request_body": _pull_request_body(proposal, verification_commands),
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="code_change_package_prepared",
+            actor="kanban-warden",
+            payload={
+                "branch_name": package["branch_name"],
+                "affected_files": package["affected_files"],
+                "verification_commands": verification_commands,
+                "mutates_source": False,
+            },
+            created_at=created_at,
+        )
+        return package
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:
@@ -125,6 +164,12 @@ class SelfImprovementEngine:
             if proposal["proposal_id"] == proposal_id:
                 return proposal
         raise ValueError(f"unknown improvement proposal: {proposal_id}")
+
+    def _is_approved(self, proposal_id: str) -> bool:
+        for approval in self.state_store.recent_improvement_approvals(limit=1000):
+            if approval["proposal_id"] == proposal_id and approval["decision"] == "approved":
+                return True
+        return False
 
 
 def _slug_from_scope(scope: str) -> str:
@@ -170,3 +215,32 @@ def _proposal_id(
         json.dumps(seed, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
     return f"prop:{proposal_type}:{digest}"
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _commit_message(proposal: dict[str, Any], verification_commands: list[str]) -> str:
+    slug = _slug_from_scope(str(proposal["target"]))
+    verification = "; ".join(verification_commands)
+    return (
+        f"feat(warden): add {slug} loop improvement\n\n"
+        f"Proposal: {proposal['proposal_id']}\n"
+        f"Evidence: {proposal['signal_id']}\n"
+        f"Verification: {verification}"
+    )
+
+
+def _pull_request_body(proposal: dict[str, Any], verification_commands: list[str]) -> str:
+    verification = "\n".join(f"- `{command}`" for command in verification_commands)
+    return (
+        "## Summary\n"
+        f"- prepare E3 code-change work for `{proposal['target']}`\n"
+        f"- evidence: `{proposal['signal_id']}`\n"
+        "- this package does not create branches or mutate source\n\n"
+        "## Verification\n"
+        f"{verification}"
+    )

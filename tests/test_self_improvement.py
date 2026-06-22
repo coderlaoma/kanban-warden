@@ -88,6 +88,116 @@ def test_self_improvement_records_e3_approval_scope(tmp_path: Path) -> None:
     }
 
 
+def test_self_improvement_rejects_expanded_approval_scope(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101"],
+        supporting_outcome_ids=["outcome-101"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    draft = SelfImprovementEngine(store).create_code_change_drafts(created_at=101.0)[0]
+
+    with pytest.raises(ValueError, match="verification commands must match"):
+        SelfImprovementEngine(store).record_code_change_approval(
+            proposal_id=draft["proposal_id"],
+            actor="hairou",
+            allowed_repository="coderlaoma/hermes-kanban-warden",
+            allowed_branch_prefix="warden/improve-",
+            verification_commands=["uv run pytest"],
+            reason="Expanded verification scope.",
+            created_at=102.0,
+        )
+
+    with pytest.raises(ValueError, match="branch prefix"):
+        SelfImprovementEngine(store).record_code_change_approval(
+            proposal_id=draft["proposal_id"],
+            actor="hairou",
+            allowed_repository="coderlaoma/hermes-kanban-warden",
+            allowed_branch_prefix="feature/",
+            verification_commands=draft["patch"]["verification_commands"],
+            reason="Wrong branch prefix.",
+            created_at=103.0,
+        )
+
+
+def test_self_improvement_prepares_approved_code_change_package(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    signal = store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101", "trace-117"],
+        supporting_outcome_ids=["outcome-101", "outcome-117"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    engine = SelfImprovementEngine(store)
+    draft = engine.create_code_change_drafts(created_at=101.0)[0]
+    engine.record_code_change_approval(
+        proposal_id=draft["proposal_id"],
+        actor="hairou",
+        allowed_repository="coderlaoma/hermes-kanban-warden",
+        allowed_branch_prefix="warden/improve-",
+        verification_commands=draft["patch"]["verification_commands"],
+        reason="Approved to prepare implementation package only.",
+        created_at=102.0,
+    )
+
+    package = engine.prepare_code_change_package(
+        proposal_id=draft["proposal_id"],
+        created_at=103.0,
+    )
+
+    assert package["proposal_id"] == draft["proposal_id"]
+    assert package["branch_name"] == draft["patch"]["branch_name"]
+    assert package["affected_files"] == draft["patch"]["affected_files"]
+    assert package["verification_commands"] == draft["patch"]["verification_commands"]
+    assert package["mutates_source"] is False
+    assert package["commit_message"] == (
+        "feat(warden): add high-activity-low-progress loop improvement\n\n"
+        f"Proposal: {draft['proposal_id']}\n"
+        f"Evidence: {signal['signal_id']}\n"
+        "Verification: uv run pytest tests/test_board_events.py -q; uv run ruff check .; uv run mypy src"
+    )
+    assert "does not create branches or mutate source" in package["pull_request_body"]
+
+    audit = store.recent_improvement_audit()[0]
+    assert audit["event_type"] == "code_change_package_prepared"
+    assert audit["payload"] == {
+        "branch_name": draft["patch"]["branch_name"],
+        "affected_files": draft["patch"]["affected_files"],
+        "verification_commands": draft["patch"]["verification_commands"],
+        "mutates_source": False,
+    }
+
+
+def test_self_improvement_package_requires_approval(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101"],
+        supporting_outcome_ids=["outcome-101"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    draft = SelfImprovementEngine(store).create_code_change_drafts(created_at=101.0)[0]
+
+    with pytest.raises(ValueError, match="approved"):
+        SelfImprovementEngine(store).prepare_code_change_package(
+            proposal_id=draft["proposal_id"],
+            created_at=102.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(
