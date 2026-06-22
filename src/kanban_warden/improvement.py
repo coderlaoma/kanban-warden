@@ -5,6 +5,13 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from .config_patch import (
+    ConfigPatchError,
+    apply_config_patch,
+    compare_config_patch,
+    prepare_config_patch,
+    rollback_config_patch,
+)
 from .state import WardenStateStore
 
 
@@ -68,6 +75,105 @@ class ImprovementEngine:
             created_at=created_at,
         )
         return approval
+
+    def prepare_config_patch(
+        self,
+        *,
+        proposal_id: str,
+        config_path: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        prepared = prepare_config_patch(proposal=proposal, config_path=config_path)
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="config_patch_prepared",
+            actor="kanban-warden",
+            payload={"target_file": prepared["target_file"], "changes": prepared["changes"]},
+            created_at=created_at,
+        )
+        return prepared
+
+    def apply_config_patch(
+        self,
+        *,
+        proposal_id: str,
+        config_path: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if not self._is_approved(proposal_id):
+            raise ConfigPatchError("config patch can only be applied after it is approved")
+        if proposal["risk"] != "low":
+            raise ConfigPatchError("only low-risk config patches can be applied automatically")
+        applied = apply_config_patch(
+            proposal=proposal,
+            config_path=config_path,
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="config_patch_applied",
+            actor="kanban-warden",
+            payload={
+                "target_file": applied["target_file"],
+                "backup_path": applied["backup_path"],
+                "changes": applied["changes"],
+            },
+            created_at=created_at,
+        )
+        return applied
+
+    def compare_config_patch(
+        self,
+        *,
+        proposal_id: str,
+        config_path: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        comparison = compare_config_patch(proposal=proposal, config_path=config_path)
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="dry_run_before",
+            actor="kanban-warden",
+            payload=comparison,
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="dry_run_after",
+            actor="kanban-warden",
+            payload=comparison,
+            created_at=created_at,
+        )
+        return comparison
+
+    def rollback_config_patch(
+        self,
+        *,
+        proposal_id: str,
+        config_path: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        rollback = rollback_config_patch(
+            proposal=proposal,
+            config_path=config_path,
+            created_at=created_at,
+        )
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="rollback_prepared",
+            actor="kanban-warden",
+            payload={
+                "target_file": rollback["target_file"],
+                "backup_path": rollback["backup_path"],
+                "changes": rollback["changes"],
+            },
+            created_at=created_at,
+        )
+        return rollback
 
     def _false_positive_signals(
         self,
@@ -211,6 +317,18 @@ class ImprovementEngine:
             },
             created_at=created_at,
         )
+
+    def _proposal_by_id(self, proposal_id: str) -> dict[str, Any]:
+        for proposal in self.state_store.recent_improvement_proposals(limit=1000):
+            if proposal["proposal_id"] == proposal_id:
+                return proposal
+        raise ValueError(f"unknown improvement proposal: {proposal_id}")
+
+    def _is_approved(self, proposal_id: str) -> bool:
+        for approval in self.state_store.recent_improvement_approvals(limit=1000):
+            if approval["proposal_id"] == proposal_id and approval["decision"] == "approved":
+                return True
+        return False
 
 
 def _outcome_id(outcome: dict[str, Any]) -> str:
