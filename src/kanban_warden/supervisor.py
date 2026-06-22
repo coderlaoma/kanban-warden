@@ -345,7 +345,7 @@ class WardenSupervisor:
                     )
                 if not plan.should_run_gc and not plan.archive_done_ids and not plan.purge_archived_ids:
                     continue
-                report = {"board": board_db.name, "plan": plan.to_dict()}
+                report: dict[str, Any] = {"board": board_db.name, "plan": plan.to_dict()}
                 if self.config.auto_advance.dry_run:
                     report["dry_run"] = True
                 else:
