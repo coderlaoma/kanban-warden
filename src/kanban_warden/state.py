@@ -416,6 +416,308 @@ class WardenStateStore:
             for row in rows
         ]
 
+    def record_improvement_signal(
+        self,
+        *,
+        signal_type: str,
+        scope: str,
+        severity: str,
+        supporting_trace_ids: list[str],
+        supporting_outcome_ids: list[str],
+        summary: str,
+        recommended_level: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if created_at is None else created_at
+        seed = {
+            "signal_type": signal_type,
+            "scope": scope,
+            "supporting_trace_ids": supporting_trace_ids,
+            "supporting_outcome_ids": supporting_outcome_ids,
+        }
+        signal_id = _stable_id("sig", signal_type, seed)
+        with self._connect() as con:
+            con.execute(
+                """
+                insert or ignore into improvement_signal(
+                  signal_id, signal_type, scope, severity, supporting_trace_ids_json,
+                  supporting_outcome_ids_json, summary, recommended_level, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    signal_id,
+                    signal_type,
+                    scope,
+                    severity,
+                    json.dumps(supporting_trace_ids, sort_keys=True),
+                    json.dumps(supporting_outcome_ids, sort_keys=True),
+                    summary,
+                    recommended_level,
+                    now,
+                ),
+            )
+        return {
+            "signal_id": signal_id,
+            "signal_type": signal_type,
+            "scope": scope,
+            "severity": severity,
+            "supporting_trace_ids": supporting_trace_ids,
+            "supporting_outcome_ids": supporting_outcome_ids,
+            "summary": summary,
+            "recommended_level": recommended_level,
+            "created_at": now,
+        }
+
+    def recent_improvement_signals(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                select signal_id, signal_type, scope, severity, supporting_trace_ids_json,
+                       supporting_outcome_ids_json, summary, recommended_level, created_at
+                from improvement_signal
+                order by created_at desc, signal_id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "signal_id": str(row[0]),
+                "signal_type": str(row[1]),
+                "scope": str(row[2]),
+                "severity": str(row[3]),
+                "supporting_trace_ids": _json_list(row[4]),
+                "supporting_outcome_ids": _json_list(row[5]),
+                "summary": str(row[6]),
+                "recommended_level": str(row[7]),
+                "created_at": float(row[8]),
+            }
+            for row in rows
+        ]
+
+    def record_improvement_audit(
+        self,
+        *,
+        subject_id: str,
+        event_type: str,
+        actor: str,
+        payload: dict[str, Any],
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if created_at is None else created_at
+        seed = {
+            "subject_id": subject_id,
+            "event_type": event_type,
+            "actor": actor,
+            "payload": payload,
+            "created_at": now,
+        }
+        audit_id = _stable_id("audit", event_type, seed)
+        with self._connect() as con:
+            con.execute(
+                """
+                insert or ignore into improvement_audit(
+                  audit_id, subject_id, event_type, actor, payload_json, created_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (audit_id, subject_id, event_type, actor, json.dumps(payload, sort_keys=True), now),
+            )
+        return {
+            "audit_id": audit_id,
+            "subject_id": subject_id,
+            "event_type": event_type,
+            "actor": actor,
+            "payload": payload,
+            "created_at": now,
+        }
+
+    def recent_improvement_audit(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                select audit_id, subject_id, event_type, actor, payload_json, created_at
+                from improvement_audit
+                order by created_at desc, audit_id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "audit_id": str(row[0]),
+                "subject_id": str(row[1]),
+                "event_type": str(row[2]),
+                "actor": str(row[3]),
+                "payload": _json_object(row[4]),
+                "created_at": float(row[5]),
+            }
+            for row in rows
+        ]
+
+    def record_improvement_proposal(
+        self,
+        *,
+        proposal_type: str,
+        level: str,
+        signal_id: str,
+        title: str,
+        evidence_summary: str,
+        target: str,
+        current_value: str,
+        suggested_value: str,
+        reason: str,
+        risk: str,
+        rollback_value: str,
+        approval_required: bool,
+        patch: dict[str, Any],
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if created_at is None else created_at
+        seed = {
+            "proposal_type": proposal_type,
+            "level": level,
+            "signal_id": signal_id,
+            "target": target,
+            "suggested_value": suggested_value,
+        }
+        proposal_id = _stable_id("prop", proposal_type, seed)
+        with self._connect() as con:
+            con.execute(
+                """
+                insert or ignore into improvement_proposal(
+                  proposal_id, proposal_type, level, signal_id, title, evidence_summary,
+                  target, current_value, suggested_value, reason, risk, rollback_value,
+                  approval_required, patch_json, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal_id,
+                    proposal_type,
+                    level,
+                    signal_id,
+                    title,
+                    evidence_summary,
+                    target,
+                    current_value,
+                    suggested_value,
+                    reason,
+                    risk,
+                    rollback_value,
+                    int(approval_required),
+                    json.dumps(patch, sort_keys=True),
+                    now,
+                ),
+            )
+        return {
+            "proposal_id": proposal_id,
+            "proposal_type": proposal_type,
+            "level": level,
+            "signal_id": signal_id,
+            "title": title,
+            "evidence_summary": evidence_summary,
+            "target": target,
+            "current_value": current_value,
+            "suggested_value": suggested_value,
+            "reason": reason,
+            "risk": risk,
+            "rollback_value": rollback_value,
+            "approval_required": approval_required,
+            "patch": patch,
+            "created_at": now,
+        }
+
+    def recent_improvement_proposals(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                select proposal_id, proposal_type, level, signal_id, title, evidence_summary,
+                       target, current_value, suggested_value, reason, risk, rollback_value,
+                       approval_required, patch_json, created_at
+                from improvement_proposal
+                order by created_at desc, proposal_id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "proposal_id": str(row[0]),
+                "proposal_type": str(row[1]),
+                "level": str(row[2]),
+                "signal_id": str(row[3]),
+                "title": str(row[4]),
+                "evidence_summary": str(row[5]),
+                "target": str(row[6]),
+                "current_value": str(row[7]),
+                "suggested_value": str(row[8]),
+                "reason": str(row[9]),
+                "risk": str(row[10]),
+                "rollback_value": str(row[11]),
+                "approval_required": bool(row[12]),
+                "patch": _json_object(row[13]),
+                "created_at": float(row[14]),
+            }
+            for row in rows
+        ]
+
+    def record_improvement_approval(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        decision: str,
+        reason: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        now = time.time() if created_at is None else created_at
+        seed = {
+            "proposal_id": proposal_id,
+            "actor": actor,
+            "decision": decision,
+            "created_at": now,
+        }
+        approval_id = _stable_id("approval", decision, seed)
+        with self._connect() as con:
+            con.execute(
+                """
+                insert or ignore into improvement_approval(
+                  approval_id, proposal_id, actor, decision, reason, created_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (approval_id, proposal_id, actor, decision, reason, now),
+            )
+        return {
+            "approval_id": approval_id,
+            "proposal_id": proposal_id,
+            "actor": actor,
+            "decision": decision,
+            "reason": reason,
+            "created_at": now,
+        }
+
+    def recent_improvement_approvals(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self._connect() as con:
+            rows = con.execute(
+                """
+                select approval_id, proposal_id, actor, decision, reason, created_at
+                from improvement_approval
+                order by created_at desc, approval_id
+                limit ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [
+            {
+                "approval_id": str(row[0]),
+                "proposal_id": str(row[1]),
+                "actor": str(row[2]),
+                "decision": str(row[3]),
+                "reason": str(row[4]),
+                "created_at": float(row[5]),
+            }
+            for row in rows
+        ]
+
     def set_runtime_metadata(self, key: str, value: dict[str, Any]) -> None:
         with self._connect() as con:
             con.execute(
@@ -495,6 +797,18 @@ class WardenStateStore:
             loop_outcome_count = int(
                 con.execute("select count(*) from loop_outcome").fetchone()[0]
             )
+            improvement_signal_count = int(
+                con.execute("select count(*) from improvement_signal").fetchone()[0]
+            )
+            improvement_audit_count = int(
+                con.execute("select count(*) from improvement_audit").fetchone()[0]
+            )
+            improvement_proposal_count = int(
+                con.execute("select count(*) from improvement_proposal").fetchone()[0]
+            )
+            improvement_approval_count = int(
+                con.execute("select count(*) from improvement_approval").fetchone()[0]
+            )
         return {
             "cursors": cursors,
             "processed_key_count": processed_count,
@@ -507,6 +821,14 @@ class WardenStateStore:
             "loop_outcome_count": loop_outcome_count,
             "loop_traces_recent": self.recent_loop_traces(limit=20),
             "loop_outcomes_recent": self.recent_loop_outcomes(limit=20),
+            "improvement_signal_count": improvement_signal_count,
+            "improvement_proposal_count": improvement_proposal_count,
+            "improvement_approval_count": improvement_approval_count,
+            "improvement_audit_count": improvement_audit_count,
+            "improvement_signals_recent": self.recent_improvement_signals(limit=20),
+            "improvement_proposals_recent": self.recent_improvement_proposals(limit=20),
+            "improvement_approvals_recent": self.recent_improvement_approvals(limit=20),
+            "improvement_audit_recent": self.recent_improvement_audit(limit=20),
         }
 
     def _connect(self) -> sqlite3.Connection:
@@ -585,6 +907,50 @@ class WardenStateStore:
                   created_at real not null,
                   primary key (trace_id, action_type, status, verification_status, created_at)
                 );
+                create table if not exists improvement_signal (
+                  signal_id text primary key,
+                  signal_type text not null,
+                  scope text not null,
+                  severity text not null,
+                  supporting_trace_ids_json text not null,
+                  supporting_outcome_ids_json text not null,
+                  summary text not null,
+                  recommended_level text not null,
+                  created_at real not null
+                );
+                create table if not exists improvement_audit (
+                  audit_id text primary key,
+                  subject_id text not null,
+                  event_type text not null,
+                  actor text not null,
+                  payload_json text not null,
+                  created_at real not null
+                );
+                create table if not exists improvement_proposal (
+                  proposal_id text primary key,
+                  proposal_type text not null,
+                  level text not null,
+                  signal_id text not null,
+                  title text not null,
+                  evidence_summary text not null,
+                  target text not null,
+                  current_value text not null,
+                  suggested_value text not null,
+                  reason text not null,
+                  risk text not null,
+                  rollback_value text not null,
+                  approval_required integer not null,
+                  patch_json text not null,
+                  created_at real not null
+                );
+                create table if not exists improvement_approval (
+                  approval_id text primary key,
+                  proposal_id text not null,
+                  actor text not null,
+                  decision text not null,
+                  reason text not null,
+                  created_at real not null
+                );
                 """
             )
             columns = {
@@ -599,8 +965,22 @@ def _json_object(raw: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _json_list(raw: Any) -> list[str]:
+    value = json.loads(str(raw))
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
 def _loop_trace_id(seed: dict[str, Any], created_at: float) -> str:
     digest = hashlib.sha256(
         json.dumps(seed, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:16]
     return f"loop-trace:{int(created_at * 1000)}:{digest}"
+
+
+def _stable_id(prefix: str, kind: str, seed: dict[str, Any]) -> str:
+    digest = hashlib.sha256(
+        json.dumps(seed, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{prefix}:{kind}:{digest}"
