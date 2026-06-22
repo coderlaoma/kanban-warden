@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -176,11 +176,11 @@ def run_deadlock_remediation(
     )
 
 
-def open_board_connection(db_path: str):
+def open_board_connection(db_path: str) -> contextlib.AbstractContextManager[sqlite3.Connection]:
     """Open a Hermes Kanban SQLite database for health-sweep remediation."""
 
     @contextlib.contextmanager
-    def _with_row_factory():
+    def _with_row_factory() -> Iterator[sqlite3.Connection]:
         with managed_connection(db_path) as conn:
             conn.row_factory = sqlite3.Row
             yield conn

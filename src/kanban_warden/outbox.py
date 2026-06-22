@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 import time
-import contextlib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -47,10 +47,14 @@ class NotificationOutboxDrainer:
         self.config = config
         self.state_store = state_store
 
-    def drain(self, board_paths: Mapping[str, str | Path], *, now: float | None = None) -> dict[str, Any]:
+    def drain(
+        self, board_paths: Mapping[str, str | Path], *, now: float | None = None
+    ) -> dict[str, Any]:
         current_time = time.time() if now is None else now
         if not self.config.notifications.delivery_enabled:
-            return OutboxDeliveryReport(enabled=False, dry_run=self.config.auto_advance.dry_run).to_dict()
+            return OutboxDeliveryReport(
+                enabled=False, dry_run=self.config.auto_advance.dry_run
+            ).to_dict()
         if self.config.auto_advance.dry_run:
             return OutboxDeliveryReport(enabled=True, dry_run=True).to_dict()
 
@@ -102,7 +106,9 @@ class NotificationOutboxDrainer:
             report["delivered"] += 1
         return report
 
-    def _deliver_one(self, row: dict[str, Any], board_paths: Mapping[str, str | Path], *, now: float) -> None:
+    def _deliver_one(
+        self, row: dict[str, Any], board_paths: Mapping[str, str | Path], *, now: float
+    ) -> None:
         payload = row["payload"] if isinstance(row["payload"], dict) else {}
         board_name = _text(payload.get("board_name")) or _text(payload.get("board")) or "default"
         task_id = _text(payload.get("target_task_id")) or _text(payload.get("task_id"))
@@ -168,7 +174,7 @@ def _has_native_subscriber(con: sqlite3.Connection, task_id: str) -> bool:
 
 
 @contextlib.contextmanager
-def _readonly_connection(db_path: str | Path):
+def _readonly_connection(db_path: str | Path) -> Iterator[sqlite3.Connection]:
     uri = f"file:{Path(db_path)}?mode=ro"
     conn = sqlite3.connect(uri, uri=True)
     try:
@@ -178,10 +184,10 @@ def _readonly_connection(db_path: str | Path):
 
 
 def _task_exists(con: sqlite3.Connection, task_id: str) -> bool:
-    return con.execute("select 1 from tasks where id = ? limit 1", (task_id,)).fetchone() is not None
-
-
-
+    return (
+        con.execute("select 1 from tasks where id = ? limit 1", (task_id,)).fetchone()
+        is not None
+    )
 
 def _table_exists(con: sqlite3.Connection, name: str) -> bool:
     return (
@@ -190,9 +196,6 @@ def _table_exists(con: sqlite3.Connection, name: str) -> bool:
         ).fetchone()
         is not None
     )
-
-
-
 
 def _assert_secret_safe(text: str) -> None:
     if default_scanner().scan(text):
