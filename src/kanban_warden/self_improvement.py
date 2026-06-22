@@ -463,6 +463,46 @@ class SelfImprovementEngine:
         )
         return rollback
 
+    def record_post_deploy_monitoring(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        monitor_window: str,
+        target_profiles: list[str],
+        metrics: dict[str, Any],
+        regressions: list[str],
+        recommendation: str,
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can record monitoring")
+        if (
+            self._audit_payload(proposal_id, "deployment_succeeded") is None
+            and self._audit_payload(proposal_id, "deployment_failed") is None
+        ):
+            raise ValueError("deployment record is required before monitoring")
+        normalized_profiles = _string_list(target_profiles)
+        if not normalized_profiles:
+            raise ValueError("monitoring target profiles are required")
+        summary = {
+            "proposal_id": proposal_id,
+            "monitor_window": monitor_window,
+            "target_profiles": normalized_profiles,
+            "metrics": dict(metrics),
+            "regressions": _string_list(regressions),
+            "recommendation": recommendation,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="post_deploy_monitor_recorded",
+            actor=actor,
+            payload=summary,
+            created_at=created_at,
+        )
+        return summary
+
     def _record_proposal_created(
         self, proposal: dict[str, Any], *, created_at: float | None
     ) -> None:
