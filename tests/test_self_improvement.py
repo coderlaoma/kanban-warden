@@ -893,6 +893,80 @@ def test_self_improvement_rollback_requires_deployment_record(tmp_path: Path) ->
         )
 
 
+def test_self_improvement_records_external_monitor_summary(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+    engine = SelfImprovementEngine(store)
+
+    summary = engine.record_post_deploy_monitoring(
+        proposal_id=draft["proposal_id"],
+        actor="release-bot",
+        monitor_window="30m",
+        target_profiles=["hermes-dev"],
+        metrics={
+            "new_detector_trigger_count": 4,
+            "false_positive_rate": 0.0,
+            "verification_failure_rate": 0.1,
+            "manual_override_rate": 0.0,
+            "gateway_error_count": 1,
+        },
+        regressions=["gateway error count increased by 1"],
+        recommendation="rollback_if_repeated",
+        created_at=109.0,
+    )
+
+    assert summary == {
+        "proposal_id": draft["proposal_id"],
+        "monitor_window": "30m",
+        "target_profiles": ["hermes-dev"],
+        "metrics": {
+            "new_detector_trigger_count": 4,
+            "false_positive_rate": 0.0,
+            "verification_failure_rate": 0.1,
+            "manual_override_rate": 0.0,
+            "gateway_error_count": 1,
+        },
+        "regressions": ["gateway error count increased by 1"],
+        "recommendation": "rollback_if_repeated",
+    }
+    audit = store.recent_improvement_audit()[0]
+    assert audit["event_type"] == "post_deploy_monitor_recorded"
+    assert audit["payload"] == summary
+
+
+def test_self_improvement_monitoring_requires_deployment_record(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+    engine.record_code_change_publication(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        branch_name=draft["patch"]["branch_name"],
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=107.0,
+    )
+
+    with pytest.raises(ValueError, match="deployment"):
+        engine.record_post_deploy_monitoring(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            monitor_window="30m",
+            target_profiles=["hermes-dev"],
+            metrics={"gateway_error_count": 0},
+            regressions=[],
+            recommendation="continue_monitoring",
+            created_at=109.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(
