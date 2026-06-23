@@ -378,6 +378,57 @@ class SelfImprovementEngine:
         )
         return merge
 
+    def prepare_code_change_deployment_plan(
+        self,
+        *,
+        proposal_id: str,
+        actor: str,
+        target_profiles: list[str],
+        commit_sha: str,
+        plugin_version: str,
+        config_changes: dict[str, Any],
+        restart_commands: list[str],
+        health_check_commands: list[str],
+        monitor_window: str,
+        rollback_commands: list[str],
+        created_at: float | None = None,
+    ) -> dict[str, Any]:
+        proposal = self._proposal_by_id(proposal_id)
+        if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
+            raise ValueError("only E3 code-change proposals can prepare deployment plans")
+        if self._audit_payload(proposal_id, "mr_merged") is None:
+            raise ValueError("merge record is required before deployment plan")
+        normalized_profiles = _string_list(target_profiles)
+        if not normalized_profiles:
+            raise ValueError("deployment plan target profiles are required")
+        normalized_restart_commands = _string_list(restart_commands)
+        normalized_health_check_commands = _string_list(health_check_commands)
+        normalized_rollback_commands = _string_list(rollback_commands)
+        if not normalized_health_check_commands:
+            raise ValueError("deployment plan health check commands are required")
+        if not normalized_rollback_commands:
+            raise ValueError("deployment plan rollback commands are required")
+        plan = {
+            "proposal_id": proposal_id,
+            "target_profiles": normalized_profiles,
+            "commit_sha": commit_sha,
+            "plugin_version": plugin_version,
+            "config_changes": dict(config_changes),
+            "restart_commands": normalized_restart_commands,
+            "health_check_commands": normalized_health_check_commands,
+            "monitor_window": monitor_window,
+            "rollback_commands": normalized_rollback_commands,
+            "mutates_runtime": False,
+        }
+        self.state_store.record_improvement_audit(
+            subject_id=proposal_id,
+            event_type="deployment_plan_prepared",
+            actor=actor,
+            payload=plan,
+            created_at=created_at,
+        )
+        return plan
+
     def record_code_change_deployment(
         self,
         *,
