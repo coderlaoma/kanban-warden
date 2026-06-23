@@ -10,12 +10,16 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from kanban_warden.config import KanbanWardenConfig
-from kanban_warden.supervisor import WardenSupervisor
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from kanban_warden.config import KanbanWardenConfig  # noqa: E402
+from kanban_warden.supervisor import WardenSupervisor  # noqa: E402
 
 
 def init_real_schema_board(db_path: Path) -> None:
@@ -195,7 +199,6 @@ def main() -> int:
         con = sqlite3.connect(board)
         reviewer_count = count(con, "select count(*) from tasks where id = 'review_impl'")
         followup_count = count(con, "select count(*) from tasks where id = 'fix_impl_review_impl'")
-        followup_status = con.execute("select status from tasks where id = 'fix_impl_review_impl'").fetchone()[0]
         impl_status = con.execute("select status from tasks where id = 'impl'").fetchone()[0]
         comments = con.execute(
             "select task_id, author, body from task_comments order by id"
@@ -203,20 +206,29 @@ def main() -> int:
         con.close()
         state_con = sqlite3.connect(state_db)
         outbox_count = count(state_con, "select count(*) from notification_outbox")
+        outbox_keys = {
+            row[0]
+            for row in state_con.execute("select key from notification_outbox order by key").fetchall()
+        }
         state_con.close()
 
         assert reviewer_count == 1
-        assert followup_count == 1
-        assert followup_status == "ready"
-        assert impl_status == "ready"
-        assert comments and {row[1] for row in comments} == {"kanban-warden"}
+        assert followup_count == 0
+        assert impl_status == "blocked"
+        assert comments == []
         assert outbox_count >= 1
+        assert {
+            "reviewer:default:impl",
+            "implementer-followup:default:review_impl:impl",
+            "review-needs-changes:default:review_impl:impl",
+            "review-needs-changes-unblock:default:review_impl:impl",
+        }.issubset(outbox_keys)
         # A second collection may see events emitted by the first mutation pass
         # (for example created/escalated comments), but it must not duplicate
         # the reviewer card or regress the source task status.
         con = sqlite3.connect(board)
         assert count(con, "select count(*) from tasks where id = 'review_impl'") == 1
-        assert con.execute("select status from tasks where id = 'impl'").fetchone()[0] == "ready"
+        assert con.execute("select status from tasks where id = 'impl'").fetchone()[0] == "blocked"
         con.close()
         assert status["leader_lock"]["active"] is True
 
@@ -231,9 +243,13 @@ def main() -> int:
             "impl_status_after_apply": impl_status,
             "reviewer_task_count": reviewer_count,
             "implementer_followup_count": followup_count,
-            "implementer_followup_status": followup_status,
             "comment_count": len(comments),
             "notification_outbox_count": outbox_count,
+            "gateway_required_outbox_count": sum(
+                1
+                for result in apply_report["action_results"]
+                if result["note"] == "board-write-disabled"
+            ),
             "leader_lock_active": status["leader_lock"]["active"],
         }
         print(json.dumps(summary, indent=2, sort_keys=True))

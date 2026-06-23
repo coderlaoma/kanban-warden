@@ -1,51 +1,16 @@
-[build-system]
-requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.build_meta"
-
-[project]
-name = "kanban-warden"
-version = "0.4.0"
-description = "Hermes plugin that warns when Kanban worker output appears to leak secrets or unsafe connection details."
-readme = "README.md"
-requires-python = ">=3.10"
-license = "MIT"
-authors = [{name = "Hairou"}]
-keywords = ["hermes", "plugin", "kanban", "security", "redaction"]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Intended Audience :: Developers",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-]
-
-dependencies = ["PyYAML>=6.0"]
-
-[project.optional-dependencies]
+[dependency-groups]
 dev = [
   "pytest>=8.0",
   "ruff>=0.5",
   "mypy>=1.8",
-  "build>=1.2",
+  "PyYAML>=6.0",
   "types-PyYAML>=6.0",
 ]
-
-[project.entry-points."hermes_agent.plugins"]
-kanban-warden = "kanban_warden"
-
-[project.scripts]
-kanban-warden = "kanban_warden.cli:main"
-
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-kanban_warden = ["plugin.yaml", "rules.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100
@@ -59,3 +24,4 @@ ignore = ["E501"]
 python_version = "3.10"
 strict = true
 packages = ["kanban_warden"]
+explicit_package_bases = true

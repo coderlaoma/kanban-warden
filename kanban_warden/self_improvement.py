@@ -756,21 +756,21 @@ def _slug_from_scope(scope: str) -> str:
 def _affected_files_for_scope(scope: str) -> list[str]:
     if scope == "detector.high_activity_low_progress":
         return [
-            "src/kanban_warden/board.py",
+            "kanban_warden/board.py",
             "tests/test_board_events.py",
             "docs/loop-supervisor/v0.4-self-improvement.md",
         ]
-    return ["src/kanban_warden/board.py", "tests/test_board_events.py"]
+    return ["kanban_warden/board.py", "tests/test_board_events.py"]
 
 
 def _verification_commands_for_scope(scope: str) -> list[str]:
     if scope.startswith("detector."):
         return [
-            "uv run pytest tests/test_board_events.py -q",
-            "uv run ruff check .",
-            "uv run mypy src",
+            "uv run --group dev pytest tests/test_board_events.py -q",
+            "uv run --group dev ruff check .",
+            "uv run --group dev mypy kanban_warden",
         ]
-    return ["uv run pytest", "uv run ruff check .", "uv run mypy src"]
+    return ["uv run --group dev pytest", "uv run --group dev ruff check .", "uv run --group dev mypy kanban_warden"]
 
 
 def _proposal_id(

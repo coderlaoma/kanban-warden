@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="check_hairou_warden.py")
@@ -28,7 +30,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--profile",
         default="hairou",
-        help="profile name passed to kanban-warden CLI for status/dry-run",
+        help="profile name passed to kanban_warden CLI for status/dry-run",
     )
     parser.add_argument(
         "--hermes-home",
@@ -94,13 +96,9 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if not args.skip_dry_run:
-        cli = _run(
-            ["kanban-warden", "--config", str(args.config), "--profile", args.profile, "status"]
-        )
+        cli = _run(_cli_command(args.config, args.profile, "status"))
         report["status_command"] = _safe_command_summary(cli)
-        dry = _run(
-            ["kanban-warden", "--config", str(args.config), "--profile", args.profile, "dry-run"]
-        )
+        dry = _run(_cli_command(args.config, args.profile, "dry-run"))
         report["dry_run_command"] = _safe_command_summary(dry)
 
     print(json.dumps(report, indent=2, sort_keys=True))
@@ -161,8 +159,21 @@ def _json_loads(text: str) -> Any:
         return None
 
 
+def _cli_command(config: Path, profile: str, command: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "kanban_warden.cli",
+        "--config",
+        str(config),
+        "--profile",
+        profile,
+        command,
+    ]
+
+
 def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, capture_output=True, timeout=60, check=False)
+    return subprocess.run(command, text=True, capture_output=True, timeout=60, check=False, cwd=ROOT)
 
 
 def _as_bool(value: Any) -> bool:
