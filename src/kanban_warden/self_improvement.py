@@ -448,7 +448,8 @@ class SelfImprovementEngine:
         proposal = self._proposal_by_id(proposal_id)
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can record deployment")
-        if self._audit_payload(proposal_id, "deployment_plan_prepared") is None:
+        plan = self._audit_payload(proposal_id, "deployment_plan_prepared")
+        if plan is None:
             raise ValueError("deployment plan is required before deployment")
         if status not in {"succeeded", "failed"}:
             raise ValueError("deployment status must be succeeded or failed")
@@ -459,6 +460,17 @@ class SelfImprovementEngine:
         normalized_rollback_commands = _string_list(rollback_commands)
         if not normalized_rollback_commands:
             raise ValueError("deployment rollback commands are required")
+        planned_fields = {
+            "target_profiles": normalized_profiles,
+            "commit_sha": commit_sha,
+            "plugin_version": plugin_version,
+            "config_changes": dict(config_changes),
+            "restart_commands": normalized_restart_commands,
+            "monitor_window": monitor_window,
+            "rollback_commands": normalized_rollback_commands,
+        }
+        if any(plan.get(field) != value for field, value in planned_fields.items()):
+            raise ValueError("deployment result must match the prepared plan")
         deployment = {
             "proposal_id": proposal_id,
             "status": status,
