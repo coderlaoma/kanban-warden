@@ -48,7 +48,7 @@ The plugin has three cooperating layers:
 3. Notification and auto-advance state machine
    - Plans actions for review-required blocks, reviewer approve/needs-changes outcomes, stale running tasks, worker failures, and retry exhaustion.
    - Uses a durable idempotency store so replayed events do not duplicate reviewer cards, comments, unblocks, or outbox notifications.
-   - Queues notification decisions into the warden state DB outbox, then a bounded drainer can write safe `kanban-warden` evidence events/comments on subscribed target tasks so the existing Kanban native notifier, gateway, and Feishu subscription path can observe them.
+   - Queues notification decisions into the warden state DB outbox, then a bounded drainer sends concise messages to the task's existing Kanban subscribers through Hermes `send_message`.
    - Applies Kanban board mutations only when `auto_advance.enabled: true` and `auto_advance.dry_run: false`.
 
 ## Installation
@@ -111,8 +111,8 @@ kanban_warden:
   # only when this profile must be pinned to specific boards.
   boards: "*"
 
-  # Queue warden decisions into the durable outbox. "origin" means the warden
-  # follows the native Kanban subscription route for the affected task/root.
+  # Queue warden decisions into the durable outbox. "origin" sends concise
+  # messages to the affected task/root's existing Kanban subscribers.
   notifications:
     enabled: true
     channels:
@@ -140,7 +140,7 @@ Key settings:
 - `kanban_warden.enabled`: starts the background supervisor at plugin registration.
 - `kanban_warden.boards`: `"*"` discovers all visible boards; a list pins specific board names.
 - `notifications.enabled`: queues warden decisions to the durable outbox.
-- `notifications.channels`: `origin` keeps routing aligned with native Kanban task subscriptions.
+- `notifications.channels`: `origin` routes delivery to existing `kanban_notify_subs` subscribers through Hermes `send_message`.
 - `auto_advance.enabled`: turns on the state-machine actions. Current write-like actions are recorded as gateway-required outbox proposals unless a dedicated delivery path handles them.
 - `auto_advance.dry_run`: when true, plans actions without applying them. The normal enabled profile value is `false`; use the CLI `dry-run` command for previews.
 - `reviewer_assignee`: optional fixed reviewer assignee. Leave `null` for portable configs so Kanban/Hermes can route reviews using its own defaults.
@@ -153,7 +153,7 @@ Advanced settings are available but intentionally omitted from the default examp
 - `leader_lock.*`: duplicate-supervisor protection. Defaults are suitable for normal gateway profiles.
 - `loop.*`: supervisor polling and health sweep cadence.
 - `state_db_path`, `board_db_path`, `hermes_home`, `log_level`: path and logging overrides for unusual deployments.
-- `notifications.delivery_*` and `notifications.evidence_*`: native evidence drainer controls for environments that intentionally write notification evidence rows/comments.
+- `notifications.delivery_*`: Hermes send delivery controls for environments that intentionally send warden notifications to origin subscribers.
 - `task_filter.*`: active/terminal task filtering for large boards.
 - `cleanup.*`: optional board/state cleanup maintenance.
 
@@ -174,7 +174,7 @@ uv run --group dev python -m kanban_warden.cli demo-lock
 
 `run-once` runs one collection pass using the supplied config. It may mutate Kanban boards only if both `auto_advance.enabled: true` and `auto_advance.dry_run: false` are set.
 
-When `notifications.delivery_enabled: true` and `auto_advance.dry_run: false`, `run-once` also drains one bounded notification outbox batch after planning/applying actions. Delivery means creating secret-scanned warden evidence on the target Kanban task; the existing `kanban_notify_subs` native notifier/gateway path remains responsible for final platform delivery.
+When `notifications.delivery_enabled: true` and `auto_advance.dry_run: false`, `run-once` also drains one bounded notification outbox batch after planning/applying actions. Delivery means resolving the target task's existing `kanban_notify_subs` rows and sending a short, secret-scanned message through Hermes `send_message`.
 
 
 ## Root-only subscription policy and decomposed task propagation
@@ -186,7 +186,7 @@ Do not manually subscribe every decomposed child task as the normal operating mo
 - `BoardEvent` summaries include relationship metadata, including parents, children, `root_task_id`, `review_required`, and comment count.
 - The supervisor tails child events, preserves per-board cursors, and feeds the notification/action state machine from those events.
 - Notification decisions are idempotent and queued in the warden state DB outbox when notifications are enabled.
-- When delivery is enabled, queued decisions are drained by writing safe evidence to subscribed target tasks, so normal root subscriptions continue to be the gateway-facing route.
+- When delivery is enabled, queued decisions are sent to subscribed target tasks through Hermes `send_message`, so normal root subscriptions continue to be the gateway-facing route.
 - Health sweeps detect root/child coordination problems such as a root task not being closed after all children are done, or a child that cannot proceed because an upstream dependency is blocked/failed.
 - When a blocked/gave-up/worker-failure child or dependency deadlock is detected, the fallback `ensure_subscription` action copies an existing root subscription to the stuck child (and ensures the root has the same subscription) using `insert or ignore`. This keeps normal entry creation root-only while allowing the native notifier to route the stuck child back to the user during incidents.
 
@@ -247,33 +247,30 @@ Expected healthy signs:
 - `state.notification_outbox_by_status` shows queued/delivered/retrying/exhausted counts when notification decisions exist.
 - `dry_run.status.policies.auto_advance.dry_run` remains true unless an operator intentionally enables board mutations.
 
-### Native notification evidence
+### Hermes send delivery
 
-To enable the production evidence drainer after dry-run review:
+To enable production delivery after dry-run review:
 
 ```yaml
 kanban_warden:
   notifications:
     enabled: true
+    channels:
+      - origin
     delivery_enabled: true
     delivery_batch_size: 10
     delivery_max_attempts: 3
     delivery_backoff_seconds: 60
     delivery_lease_seconds: 300
-    evidence_events: true
-    evidence_comments: false
 ```
 
-The drainer does not use platform credentials and does not print subscriber identifiers. It requires the target task to have at least one row in `kanban_notify_subs`; otherwise the outbox row is retried with backoff and eventually marked `exhausted`. Evidence event payloads include the outbox key, task id, action kind, reason, and `native_route: kanban_notify_subs`.
+The drainer does not use platform credentials and does not print subscriber identifiers. It requires the target task to have at least one row in `kanban_notify_subs`; otherwise the outbox row is retried with backoff and eventually marked `exhausted`. Each subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability.
 
 Safe hairou verification queries:
 
 ```bash
 sqlite3 ~/.hermes/profiles/hairou/kanban-warden/state.db \
   "select status, attempts, count(*) from notification_outbox group by status, attempts;"
-
-sqlite3 ~/.hermes/kanban/boards/<board>/kanban.db \
-  "select task_id, kind, payload from task_events where payload like '%warden-notification-delivered%' order by id desc limit 5;"
 ```
 
 ### Supervisor health and logs
@@ -334,7 +331,7 @@ The script creates a disposable Kanban database and verifies:
 - relationship inference from `task_links`;
 - dry-run planning for notify, reviewer creation, comments, unblocks, and retry;
 - real-schema reviewer/comment/unblock mutations when dry-run is disabled;
-- durable notification outbox entries and native evidence delivery;
+- durable notification outbox entries and Hermes send delivery through fake subscribers;
 - idempotency on repeated collection; and
 - active leader lock status.
 
@@ -359,9 +356,9 @@ uv run --group dev mypy kanban_warden
 
 ## Notification reliability boundary
 
-The MVP drains notification decisions by creating native Kanban evidence on tasks that already have `kanban_notify_subs` subscribers. This proves handoff to the Hermes/Kanban notifier path without adding direct Feishu, WeChat, or other platform credentials to the warden.
+The MVP drains notification decisions by sending concise messages to tasks that already have `kanban_notify_subs` subscribers. The plugin does not add direct Feishu, WeChat, or other platform credentials; it delegates transport to Hermes `send_message`.
 
-Known operational boundary: Feishu, WeChat/iLink, or other gateway rate limits can still cause downstream notifier backoff and retries. Warden records notification intent and native evidence handoff; final user-visible delivery must be validated against the real gateway behavior in the target deployment.
+Known operational boundary: Feishu, WeChat/iLink, or other gateway rate limits can still cause send failures. Warden records notification intent and retries failed sends from its own outbox; final user-visible delivery must be validated against the real gateway behavior in the target deployment.
 
 ## Troubleshooting
 
@@ -393,7 +390,7 @@ Secret scanner warning appears:
 
 ## MVP limitations
 
-- Direct platform transport delivery is not implemented; the drainer hands off through Kanban native notifier evidence and existing subscriptions.
+- Delivery depends on Hermes `send_message` remaining available in-process or through the `hermes send` CLI fallback.
 - State-machine policies are intentionally narrow and focused on common Kanban workflow events.
 - The plugin depends on current Hermes Kanban SQLite schema details for mutation paths.
 - There is no packaged migration system for future state DB schema changes yet.
@@ -401,7 +398,7 @@ Secret scanner warning appears:
 
 ## Suggested next iterations
 
-1. Add gateway-level delivery acknowledgements if Hermes exposes them, so warden can distinguish native evidence handoff from final platform receipt.
+1. Add gateway-level delivery acknowledgements if Hermes exposes them, so warden can distinguish send acceptance from final platform receipt.
 2. Add config validation with clearer startup errors for invalid policy combinations.
 3. Add state DB migrations and version reporting.
 4. Add integration tests against a live Hermes Kanban board fixture.
