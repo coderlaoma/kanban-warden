@@ -1063,6 +1063,24 @@ def test_self_improvement_records_external_rollback_result(tmp_path: Path) -> No
     assert audits[1]["payload"] == rollback
 
 
+def test_self_improvement_rollback_requires_health_check_status(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+
+    with pytest.raises(ValueError, match="health check"):
+        SelfImprovementEngine(store).record_code_change_rollback(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            reason="Post-deploy health check regressed.",
+            target_profiles=["hermes-dev"],
+            restored_commit_sha="prev1234",
+            restored_plugin_version="0.3.9+prev1234",
+            rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+            health_check_result={},
+            created_at=111.0,
+        )
+
+
 def test_self_improvement_rollback_requires_deployment_record(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_requested_human_review(store)
