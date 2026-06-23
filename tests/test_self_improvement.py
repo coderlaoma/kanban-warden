@@ -1050,6 +1050,48 @@ def test_self_improvement_deployment_plan_requires_plugin_version(tmp_path: Path
         )
 
 
+@pytest.mark.parametrize(
+    (
+        "target_profiles",
+        "restart_commands",
+        "health_check_commands",
+        "rollback_commands",
+        "message",
+    ),
+    [
+        ([""], ["systemctl reload hermes-kanban-warden"], ["kanban-warden --profile hermes-dev dry-run"], ["git revert abc1234"], "target profiles"),
+        (["hermes-dev"], [""], ["kanban-warden --profile hermes-dev dry-run"], ["git revert abc1234"], "restart commands"),
+        (["hermes-dev"], ["systemctl reload hermes-kanban-warden"], [""], ["git revert abc1234"], "health check commands"),
+        (["hermes-dev"], ["systemctl reload hermes-kanban-warden"], ["kanban-warden --profile hermes-dev dry-run"], [""], "rollback commands"),
+    ],
+)
+def test_self_improvement_deployment_plan_rejects_blank_list_items(
+    tmp_path: Path,
+    target_profiles: list[str],
+    restart_commands: list[str],
+    health_check_commands: list[str],
+    rollback_commands: list[str],
+    message: str,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_merged_code_change(store)
+
+    with pytest.raises(ValueError, match=message):
+        SelfImprovementEngine(store).prepare_code_change_deployment_plan(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=target_profiles,
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={"policies": "unchanged"},
+            restart_commands=restart_commands,
+            health_check_commands=health_check_commands,
+            monitor_window="30m",
+            rollback_commands=rollback_commands,
+            created_at=109.0,
+        )
+
+
 def test_self_improvement_records_external_deployment_result(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_deployment_planned_code_change(store)
@@ -1177,6 +1219,41 @@ def test_self_improvement_deployment_requires_health_check_status(tmp_path: Path
             health_check_result={},
             monitor_window="30m",
             rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+            status="succeeded",
+            created_at=110.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("target_profiles", "restart_commands", "rollback_commands", "message"),
+    [
+        ([""], ["systemctl reload hermes-kanban-warden"], ["git revert abc1234", "systemctl reload hermes-kanban-warden"], "target profiles"),
+        (["hermes-dev"], [""], ["git revert abc1234", "systemctl reload hermes-kanban-warden"], "restart commands"),
+        (["hermes-dev"], ["systemctl reload hermes-kanban-warden"], [""], "rollback commands"),
+    ],
+)
+def test_self_improvement_deployment_rejects_blank_list_items(
+    tmp_path: Path,
+    target_profiles: list[str],
+    restart_commands: list[str],
+    rollback_commands: list[str],
+    message: str,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployment_planned_code_change(store)
+
+    with pytest.raises(ValueError, match=message):
+        SelfImprovementEngine(store).record_code_change_deployment(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=target_profiles,
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={"policies": "unchanged"},
+            restart_commands=restart_commands,
+            health_check_result={"status": "passed"},
+            monitor_window="30m",
+            rollback_commands=rollback_commands,
             status="succeeded",
             created_at=110.0,
         )
@@ -1339,6 +1416,36 @@ def test_self_improvement_rollback_must_match_prepared_plan(tmp_path: Path) -> N
         )
 
 
+@pytest.mark.parametrize(
+    ("target_profiles", "rollback_commands", "message"),
+    [
+        ([""], ["git revert abc1234", "systemctl reload hermes-kanban-warden"], "target profiles"),
+        (["hermes-dev"], [""], "rollback commands"),
+    ],
+)
+def test_self_improvement_rollback_rejects_blank_list_items(
+    tmp_path: Path,
+    target_profiles: list[str],
+    rollback_commands: list[str],
+    message: str,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+
+    with pytest.raises(ValueError, match=message):
+        SelfImprovementEngine(store).record_code_change_rollback(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            reason="Post-deploy health check regressed.",
+            target_profiles=target_profiles,
+            restored_commit_sha="prev1234",
+            restored_plugin_version="0.3.9+prev1234",
+            rollback_commands=rollback_commands,
+            health_check_result={"status": "passed"},
+            created_at=111.0,
+        )
+
+
 def test_self_improvement_records_external_monitor_summary(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_deployed_code_change(store)
@@ -1454,6 +1561,23 @@ def test_self_improvement_monitoring_requires_summary_metadata(
             metrics=metrics,
             regressions=[],
             recommendation=recommendation,
+            created_at=111.0,
+        )
+
+
+def test_self_improvement_monitoring_rejects_blank_target_profile(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+
+    with pytest.raises(ValueError, match="target profiles"):
+        SelfImprovementEngine(store).record_post_deploy_monitoring(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            monitor_window="30m",
+            target_profiles=[""],
+            metrics={"gateway_error_count": 0},
+            regressions=[],
+            recommendation="continue_monitoring",
             created_at=111.0,
         )
 

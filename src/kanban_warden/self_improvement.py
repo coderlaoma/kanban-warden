@@ -423,12 +423,24 @@ class SelfImprovementEngine:
             raise ValueError("deployment plan commit must match the merge commit")
         if not plugin_version.strip():
             raise ValueError("deployment plan plugin version is required")
-        normalized_profiles = _string_list(target_profiles)
+        normalized_profiles = _required_string_list(
+            target_profiles,
+            "deployment plan target profiles",
+        )
         if not normalized_profiles:
             raise ValueError("deployment plan target profiles are required")
-        normalized_restart_commands = _string_list(restart_commands)
-        normalized_health_check_commands = _string_list(health_check_commands)
-        normalized_rollback_commands = _string_list(rollback_commands)
+        normalized_restart_commands = _required_string_list(
+            restart_commands,
+            "deployment plan restart commands",
+        )
+        normalized_health_check_commands = _required_string_list(
+            health_check_commands,
+            "deployment plan health check commands",
+        )
+        normalized_rollback_commands = _required_string_list(
+            rollback_commands,
+            "deployment plan rollback commands",
+        )
         if not normalized_restart_commands:
             raise ValueError("deployment plan restart commands are required")
         if not normalized_health_check_commands:
@@ -482,11 +494,20 @@ class SelfImprovementEngine:
             raise ValueError("deployment plan is required before deployment")
         if status not in {"succeeded", "failed"}:
             raise ValueError("deployment status must be succeeded or failed")
-        normalized_profiles = _string_list(target_profiles)
+        normalized_profiles = _required_string_list(
+            target_profiles,
+            "deployment target profiles",
+        )
         if not normalized_profiles:
             raise ValueError("deployment target profiles are required")
-        normalized_restart_commands = _string_list(restart_commands)
-        normalized_rollback_commands = _string_list(rollback_commands)
+        normalized_restart_commands = _required_string_list(
+            restart_commands,
+            "deployment restart commands",
+        )
+        normalized_rollback_commands = _required_string_list(
+            rollback_commands,
+            "deployment rollback commands",
+        )
         if not normalized_rollback_commands:
             raise ValueError("deployment rollback commands are required")
         planned_fields = {
@@ -563,10 +584,16 @@ class SelfImprovementEngine:
             raise ValueError("deployment record is required before rollback")
         if not reason.strip():
             raise ValueError("rollback reason is required")
-        normalized_profiles = _string_list(target_profiles)
+        normalized_profiles = _required_string_list(
+            target_profiles,
+            "rollback target profiles",
+        )
         if not normalized_profiles:
             raise ValueError("rollback target profiles are required")
-        normalized_rollback_commands = _string_list(rollback_commands)
+        normalized_rollback_commands = _required_string_list(
+            rollback_commands,
+            "rollback commands",
+        )
         if not normalized_rollback_commands:
             raise ValueError("rollback commands are required")
         if (
@@ -633,7 +660,10 @@ class SelfImprovementEngine:
             and self._audit_payload(proposal_id, "deployment_failed") is None
         ):
             raise ValueError("deployment record is required before monitoring")
-        normalized_profiles = _string_list(target_profiles)
+        normalized_profiles = _required_string_list(
+            target_profiles,
+            "monitoring target profiles",
+        )
         if not normalized_profiles:
             raise ValueError("monitoring target profiles are required")
         if (
@@ -768,6 +798,13 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value]
+
+
+def _required_string_list(value: Any, field_name: str) -> list[str]:
+    items = _string_list(value)
+    if any(not item.strip() for item in items):
+        raise ValueError(f"{field_name} must not contain blank entries")
+    return items
 
 
 def _command_result(value: dict[str, Any]) -> dict[str, Any]:
