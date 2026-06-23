@@ -851,6 +851,26 @@ def test_self_improvement_deployment_plan_must_match_merge_commit(tmp_path: Path
         )
 
 
+def test_self_improvement_deployment_plan_requires_restart_commands(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_merged_code_change(store)
+
+    with pytest.raises(ValueError, match="restart commands"):
+        SelfImprovementEngine(store).prepare_code_change_deployment_plan(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=["hermes-dev"],
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={"policies": "unchanged"},
+            restart_commands=[],
+            health_check_commands=["kanban-warden --profile hermes-dev dry-run"],
+            monitor_window="30m",
+            rollback_commands=["git revert abc1234"],
+            created_at=109.0,
+        )
+
+
 def test_self_improvement_records_external_deployment_result(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_deployment_planned_code_change(store)

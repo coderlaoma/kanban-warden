@@ -407,6 +407,8 @@ class SelfImprovementEngine:
         normalized_restart_commands = _string_list(restart_commands)
         normalized_health_check_commands = _string_list(health_check_commands)
         normalized_rollback_commands = _string_list(rollback_commands)
+        if not normalized_restart_commands:
+            raise ValueError("deployment plan restart commands are required")
         if not normalized_health_check_commands:
             raise ValueError("deployment plan health check commands are required")
         if not normalized_rollback_commands:
