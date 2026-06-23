@@ -759,6 +759,78 @@ def test_self_improvement_merge_requires_publication(tmp_path: Path) -> None:
         )
 
 
+def test_self_improvement_prepares_deployment_plan_after_merge(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_merged_code_change(store)
+    engine = SelfImprovementEngine(store)
+
+    plan = engine.prepare_code_change_deployment_plan(
+        proposal_id=draft["proposal_id"],
+        actor="release-bot",
+        target_profiles=["hermes-dev"],
+        commit_sha="abc1234",
+        plugin_version="0.4.0+abc1234",
+        config_changes={"policies": "unchanged"},
+        restart_commands=["systemctl reload hermes-kanban-warden"],
+        health_check_commands=["kanban-warden --profile hermes-dev dry-run"],
+        monitor_window="30m",
+        rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+        created_at=109.0,
+    )
+
+    assert plan == {
+        "proposal_id": draft["proposal_id"],
+        "target_profiles": ["hermes-dev"],
+        "commit_sha": "abc1234",
+        "plugin_version": "0.4.0+abc1234",
+        "config_changes": {"policies": "unchanged"},
+        "restart_commands": ["systemctl reload hermes-kanban-warden"],
+        "health_check_commands": ["kanban-warden --profile hermes-dev dry-run"],
+        "monitor_window": "30m",
+        "rollback_commands": ["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+        "mutates_runtime": False,
+    }
+    audit = store.recent_improvement_audit()[0]
+    assert audit["event_type"] == "deployment_plan_prepared"
+    assert audit["payload"] == plan
+
+
+def test_self_improvement_deployment_plan_requires_merge(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+    engine.record_code_change_publication(
+        proposal_id=draft["proposal_id"],
+        actor="kanban-warden",
+        branch_name=draft["patch"]["branch_name"],
+        branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        created_at=107.0,
+    )
+
+    with pytest.raises(ValueError, match="merge"):
+        engine.prepare_code_change_deployment_plan(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=["hermes-dev"],
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={"policies": "unchanged"},
+            restart_commands=["systemctl reload hermes-kanban-warden"],
+            health_check_commands=["kanban-warden --profile hermes-dev dry-run"],
+            monitor_window="30m",
+            rollback_commands=["git revert abc1234"],
+            created_at=109.0,
+        )
+
+
 def test_self_improvement_records_external_deployment_result(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_requested_human_review(store)
@@ -1113,6 +1185,26 @@ def _prepare_requested_human_review(store: WardenStateStore) -> dict[str, object
 
 
 def _prepare_deployed_code_change(store: WardenStateStore) -> dict[str, object]:
+    draft = _prepare_merged_code_change(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_code_change_deployment(
+        proposal_id=str(draft["proposal_id"]),
+        actor="release-bot",
+        target_profiles=["hermes-dev"],
+        commit_sha="abc1234",
+        plugin_version="0.4.0+abc1234",
+        config_changes={"policies": "unchanged"},
+        restart_commands=["systemctl reload hermes-kanban-warden"],
+        health_check_result={"status": "failed", "summary": "health check regressed"},
+        monitor_window="30m",
+        rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+        status="failed",
+        created_at=108.0,
+    )
+    return draft
+
+
+def _prepare_merged_code_change(store: WardenStateStore) -> dict[str, object]:
     draft = _prepare_requested_human_review(store)
     engine = SelfImprovementEngine(store)
     engine.record_human_review_decision(
@@ -1130,18 +1222,14 @@ def _prepare_deployed_code_change(store: WardenStateStore) -> dict[str, object]:
         pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
         created_at=107.0,
     )
-    engine.record_code_change_deployment(
+    engine.record_code_change_merge(
         proposal_id=str(draft["proposal_id"]),
         actor="release-bot",
-        target_profiles=["hermes-dev"],
-        commit_sha="abc1234",
-        plugin_version="0.4.0+abc1234",
-        config_changes={"policies": "unchanged"},
-        restart_commands=["systemctl reload hermes-kanban-warden"],
-        health_check_result={"status": "failed", "summary": "health check regressed"},
-        monitor_window="30m",
-        rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
-        status="failed",
+        pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+        base_branch="main",
+        merge_commit_sha="abc1234",
+        merged_by="lead",
+        merged_at="2026-06-23T10:00:00Z",
         created_at=108.0,
     )
     return draft
