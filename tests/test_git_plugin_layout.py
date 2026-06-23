@@ -41,7 +41,7 @@ def test_root_plugin_manifest_supports_hermes_git_install() -> None:
     manifest = yaml.safe_load(plugin_yaml.read_text(encoding="utf-8"))
 
     assert manifest["name"] == "kanban-warden"
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.7.0"
     assert manifest["hooks"] == ["pre_tool_call", "transform_tool_result"]
     assert manifest["provides_tools"] == []
 

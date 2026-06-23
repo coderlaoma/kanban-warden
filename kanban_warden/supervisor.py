@@ -15,6 +15,7 @@ from .actions import KanbanActionEngine, PlannedAction
 from .board import BoardEventTailer, analyze_health, default_hermes_home, discover_boards
 from .cleanup import StateCleanupConfig, execute_cleanup_plan, plan_cleanup, prune_state_store
 from .config import BoardDatabase, KanbanWardenConfig, discover_board_databases
+from .delivery import HermesMessageSender, MessageSender
 from .lock import LeaderLock
 from .outbox import NotificationOutboxDrainer
 from .remediation import open_board_connection, report_to_dict, run_deadlock_remediation
@@ -32,6 +33,7 @@ class WardenSupervisor:
         *,
         profile_name: str | None = None,
         lock: LeaderLock | None = None,
+        message_sender: MessageSender | None = None,
     ) -> None:
         self.config = config
         self.profile_name = profile_name or os.environ.get("HERMES_PROFILE", "default")
@@ -41,7 +43,11 @@ class WardenSupervisor:
         self.state_store = WardenStateStore(_default_state_path(config))
         self.event_tailer = BoardEventTailer(self.state_store)
         self.action_engine = KanbanActionEngine(config, self.state_store)
-        self.outbox_drainer = NotificationOutboxDrainer(config, self.state_store)
+        self.outbox_drainer = NotificationOutboxDrainer(
+            config,
+            self.state_store,
+            message_sender=message_sender or HermesMessageSender(),
+        )
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_heartbeat = 0.0

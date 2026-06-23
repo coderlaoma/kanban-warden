@@ -12,8 +12,8 @@ kanban_warden:
   # only when this profile must be pinned to specific boards.
   boards: "*"
 
-  # Queue warden decisions into the durable outbox. "origin" means the warden
-  # follows the native Kanban subscription route for the affected task/root.
+  # Queue warden decisions into the durable outbox. "origin" sends concise
+  # messages to the affected task/root's existing Kanban subscribers.
   notifications:
     enabled: true
     channels:
