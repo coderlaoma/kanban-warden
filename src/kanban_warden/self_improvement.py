@@ -83,6 +83,12 @@ class SelfImprovementEngine:
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can be approved with this method")
         branch_name = str(proposal["patch"].get("branch_name", ""))
+        if not allowed_repository.strip():
+            raise ValueError("approval allowed repository is required")
+        if not allowed_branch_prefix.strip():
+            raise ValueError("approval branch prefix is required")
+        if not reason.strip():
+            raise ValueError("approval reason is required")
         if not branch_name.startswith(allowed_branch_prefix):
             raise ValueError("approval branch prefix must match the proposal branch")
         if verification_commands != proposal["patch"].get("verification_commands", []):
