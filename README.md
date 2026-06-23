@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.4.0`
+MVP version: `0.5.0`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -25,9 +25,9 @@ This project uses `hermes-kanban-warden` as the human-facing display name. The t
 
 - GitHub repository: `coderlaoma/hermes-kanban-warden`
 - Python import/config namespace: `kanban_warden`
-- Python distribution, CLI command, and Hermes plugin entry point: `kanban-warden`
+- Hermes plugin slug: `kanban-warden`
 
-Do not rename the Python package, entry point, CLI, runtime log prefix, database paths, or config namespace unless a future migration explicitly scopes that breaking change.
+Do not rename the plugin slug, Python package, runtime log prefix, database paths, or config namespace unless a future migration explicitly scopes that breaking change.
 
 ## Design overview
 
@@ -51,32 +51,32 @@ The plugin has three cooperating layers:
    - Queues notification decisions into the warden state DB outbox, then a bounded drainer can write safe `kanban-warden` evidence events/comments on subscribed target tasks so the existing Kanban native notifier, gateway, and Feishu subscription path can observe them.
    - Applies Kanban board mutations only when `auto_advance.enabled: true` and `auto_advance.dry_run: false`.
 
-## Installation from a checkout
+## Installation
 
-Recommended for development:
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -e '.[dev]'
-```
-
-Runtime-only install:
+Install the plugin through Hermes' Git plugin manager:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install .
+hermes plugins install coderlaoma/hermes-kanban-warden
 ```
 
-Build artifacts:
+Update an existing install after a new tag is published:
 
 ```bash
-. .venv/bin/activate
-python -m build
+hermes plugins update kanban-warden
 ```
 
-Hermes discovers the plugin through the `hermes_agent.plugins` entry point named `kanban-warden`.
+Pinning to a specific release depends on the Hermes plugin manager version. If
+the local CLI does not support a version flag, update the cloned plugin checkout
+under the active Hermes home to tag `v0.5.0`.
+
+Development setup from a source checkout:
+
+```bash
+uv sync --group dev
+```
+
+Hermes discovers this repository as a directory plugin through the root
+`plugin.yaml` and `__init__.py` files.
 
 ## Enable the Hermes plugin
 
@@ -175,13 +175,13 @@ Key settings:
 
 ## CLI usage
 
-The package installs `kanban-warden` for inspection and smoke testing.
+The checkout exposes a debug CLI module for inspection and smoke testing.
 
 ```bash
-kanban-warden --config examples/config.yaml status
-kanban-warden --config examples/config.yaml dry-run
-kanban-warden --config examples/config.yaml run-once
-kanban-warden demo-lock
+uv run --group dev python -m kanban_warden.cli --config examples/config.yaml status
+uv run --group dev python -m kanban_warden.cli --config examples/config.yaml dry-run
+uv run --group dev python -m kanban_warden.cli --config examples/config.yaml run-once
+uv run --group dev python -m kanban_warden.cli demo-lock
 ```
 
 `status` prints effective config, leader-lock state, runtime metadata, and policy settings.
@@ -221,7 +221,7 @@ cd /data/hairou/project/kanban-warden
 When operating from the central Hermes host instead of an already-routed hairoudev shell, prefix commands with SSH, for example:
 
 ```bash
-ssh hairoudev 'cd /data/hairou/project/kanban-warden && uv run --extra dev pytest -q'
+ssh hairoudev 'cd /data/hairou/project/kanban-warden && uv run --group dev pytest -q'
 ```
 
 ### Configuration checks
@@ -229,7 +229,7 @@ ssh hairoudev 'cd /data/hairou/project/kanban-warden && uv run --extra dev pytes
 Inspect the active Hairou profile configuration without printing secrets. The only required values for supervisor startup are the plugin entry and `kanban_warden.enabled: true`:
 
 ```bash
-uv run --extra dev python scripts/check_hairou_warden.py --config ~/.hermes/profiles/hairou/config.yaml --skip-dry-run
+uv run --group dev python scripts/check_hairou_warden.py --config ~/.hermes/profiles/hairou/config.yaml --skip-dry-run
 ```
 
 The script reports whether `plugins.enabled` contains `kanban-warden`, whether `kanban_warden.enabled` parses as true, the configured board selector, notification/auto-advance booleans, and safe supervisor log hints. It does not print token-like values.
@@ -237,7 +237,7 @@ The script reports whether `plugins.enabled` contains `kanban-warden`, whether `
 If the target profile uses a different Hermes home or config file, pass it explicitly:
 
 ```bash
-uv run --extra dev python scripts/check_hairou_warden.py --config /path/to/config.yaml --hermes-home /path/to/.hermes --profile hairou
+uv run --group dev python scripts/check_hairou_warden.py --config /path/to/config.yaml --hermes-home /path/to/.hermes --profile hairou
 ```
 
 ### Dry-run and status
@@ -245,13 +245,13 @@ uv run --extra dev python scripts/check_hairou_warden.py --config /path/to/confi
 Run a read-only collection pass before enabling real auto-advance:
 
 ```bash
-kanban-warden --config ~/.hermes/profiles/hairou/config.yaml --profile hairou dry-run
+uv run --group dev python -m kanban_warden.cli --config ~/.hermes/profiles/hairou/config.yaml --profile hairou dry-run
 ```
 
 Check effective supervisor status and leader-lock ownership:
 
 ```bash
-kanban-warden --config ~/.hermes/profiles/hairou/config.yaml --profile hairou status
+uv run --group dev python -m kanban_warden.cli --config ~/.hermes/profiles/hairou/config.yaml --profile hairou status
 ```
 
 Expected healthy signs:
@@ -316,11 +316,11 @@ journalctl --user -u hermes -n 200 --no-pager  # if a user systemd unit is used
 Run these in the canonical checkout before handing off changes:
 
 ```bash
-uv run --extra dev pytest -q
-uv run --extra dev ruff check src tests scripts
-uv run --extra dev mypy src/kanban_warden
-uv run --extra dev python scripts/check_hairou_warden.py --config examples/config.yaml --skip-dry-run
-uv run --extra dev python scripts/verify_mvp.py
+uv run --group dev pytest -q
+uv run --group dev ruff check .
+uv run --group dev mypy kanban_warden
+uv run --group dev python scripts/check_hairou_warden.py --config examples/config.yaml --skip-dry-run
+uv run --group dev python scripts/verify_mvp.py
 ```
 
 No command above should require or print secrets. Use synthetic test data only.
@@ -341,8 +341,7 @@ No command above should require or print secrets. Use synthetic test data only.
 Run the MVP verification script in the development environment:
 
 ```bash
-. .venv/bin/activate
-python scripts/verify_mvp.py
+uv run --group dev python scripts/verify_mvp.py
 ```
 
 The script creates a disposable Kanban database and verifies:
@@ -360,11 +359,9 @@ A successful run prints JSON with `"ok": true` and explanatory counts.
 Development checks:
 
 ```bash
-. .venv/bin/activate
-pytest
-ruff check .
-mypy src
-python -m build
+uv run --group dev pytest
+uv run --group dev ruff check .
+uv run --group dev mypy kanban_warden
 ```
 
 ## Safety and security
@@ -387,7 +384,7 @@ Known operational boundary: Feishu, WeChat/iLink, or other gateway rate limits c
 No boards discovered:
 - Confirm `kanban_warden.boards` is `"*"` or names the target board.
 - Confirm the running profile has the expected `HERMES_HOME` or set `kanban_warden.hermes_home` explicitly.
-- Run `kanban-warden --config examples/config.yaml dry-run` and inspect `boards`.
+- Run `uv run --group dev python -m kanban_warden.cli --config examples/config.yaml dry-run` and inspect `boards`.
 
 Supervisor does not start:
 - Confirm the package is installed in the Python environment used by Hermes.

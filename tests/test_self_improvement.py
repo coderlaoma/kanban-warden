@@ -36,14 +36,14 @@ def test_self_improvement_creates_e3_code_change_draft_from_policy_gap(
     assert draft["patch"] == {
         "branch_name": f"warden/improve-{draft['proposal_id'].split(':')[-1]}-high-activity-low-progress",
         "affected_files": [
-            "src/kanban_warden/board.py",
+            "kanban_warden/board.py",
             "tests/test_board_events.py",
             "docs/loop-supervisor/v0.4-self-improvement.md",
         ],
         "verification_commands": [
-            "uv run pytest tests/test_board_events.py -q",
-            "uv run ruff check .",
-            "uv run mypy src",
+            "uv run --group dev pytest tests/test_board_events.py -q",
+            "uv run --group dev ruff check .",
+            "uv run --group dev mypy kanban_warden",
         ],
         "mutates_source": False,
     }
@@ -108,7 +108,7 @@ def test_self_improvement_rejects_expanded_approval_scope(tmp_path: Path) -> Non
             actor="hairou",
             allowed_repository="coderlaoma/hermes-kanban-warden",
             allowed_branch_prefix="warden/improve-",
-            verification_commands=["uv run pytest"],
+            verification_commands=["uv run --group dev pytest"],
             reason="Expanded verification scope.",
             created_at=102.0,
         )
@@ -202,7 +202,7 @@ def test_self_improvement_prepares_approved_code_change_package(tmp_path: Path) 
         "feat(warden): add high-activity-low-progress loop improvement\n\n"
         f"Proposal: {draft['proposal_id']}\n"
         f"Evidence: {signal['signal_id']}\n"
-        "Verification: uv run pytest tests/test_board_events.py -q; uv run ruff check .; uv run mypy src"
+        "Verification: uv run --group dev pytest tests/test_board_events.py -q; uv run --group dev ruff check .; uv run --group dev mypy kanban_warden"
     )
     assert "does not create branches or mutate source" in package["pull_request_body"]
 
@@ -267,12 +267,12 @@ def test_self_improvement_records_passed_code_change_verification(tmp_path: Path
         actor="kanban-warden",
         command_results=[
             {
-                "command": "uv run pytest tests/test_board_events.py -q",
+                "command": "uv run --group dev pytest tests/test_board_events.py -q",
                 "exit_code": 0,
                 "output": "12 passed",
             },
-            {"command": "uv run ruff check .", "exit_code": 0, "output": "All checks passed!"},
-            {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+            {"command": "uv run --group dev ruff check .", "exit_code": 0, "output": "All checks passed!"},
+            {"command": "uv run --group dev mypy kanban_warden", "exit_code": 0, "output": "Success"},
         ],
         created_at=104.0,
     )
@@ -327,18 +327,18 @@ def test_self_improvement_records_failed_code_change_verification(tmp_path: Path
         actor="kanban-warden",
         command_results=[
             {
-                "command": "uv run pytest tests/test_board_events.py -q",
+                "command": "uv run --group dev pytest tests/test_board_events.py -q",
                 "exit_code": 1,
                 "output": "failed",
             },
-            {"command": "uv run ruff check .", "exit_code": 0, "output": "All checks passed!"},
-            {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+            {"command": "uv run --group dev ruff check .", "exit_code": 0, "output": "All checks passed!"},
+            {"command": "uv run --group dev mypy kanban_warden", "exit_code": 0, "output": "Success"},
         ],
         created_at=104.0,
     )
 
     assert verification["status"] == "failed"
-    assert verification["failed_commands"] == ["uv run pytest tests/test_board_events.py -q"]
+    assert verification["failed_commands"] == ["uv run --group dev pytest tests/test_board_events.py -q"]
     assert store.recent_improvement_audit()[0]["event_type"] == "verification_failed"
 
 
@@ -372,7 +372,7 @@ def test_self_improvement_verification_rejects_unapproved_commands(tmp_path: Pat
             proposal_id=draft["proposal_id"],
             actor="kanban-warden",
             command_results=[
-                {"command": "uv run pytest", "exit_code": 0, "output": "83 passed"},
+                {"command": "uv run --group dev pytest", "exit_code": 0, "output": "83 passed"},
             ],
             created_at=104.0,
         )
@@ -408,16 +408,16 @@ def test_self_improvement_verification_requires_prepared_package(tmp_path: Path)
             actor="kanban-warden",
             command_results=[
                 {
-                    "command": "uv run pytest tests/test_board_events.py -q",
+                    "command": "uv run --group dev pytest tests/test_board_events.py -q",
                     "exit_code": 0,
                     "output": "12 passed",
                 },
                 {
-                    "command": "uv run ruff check .",
+                    "command": "uv run --group dev ruff check .",
                     "exit_code": 0,
                     "output": "All checks passed!",
                 },
-                {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+                {"command": "uv run --group dev mypy kanban_warden", "exit_code": 0, "output": "Success"},
             ],
             created_at=103.0,
         )
@@ -454,12 +454,12 @@ def test_self_improvement_prepares_human_review_packet_after_verification(
         actor="kanban-warden",
         command_results=[
             {
-                "command": "uv run pytest tests/test_board_events.py -q",
+                "command": "uv run --group dev pytest tests/test_board_events.py -q",
                 "exit_code": 0,
                 "output": "12 passed",
             },
-            {"command": "uv run ruff check .", "exit_code": 0, "output": "All checks passed!"},
-            {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+            {"command": "uv run --group dev ruff check .", "exit_code": 0, "output": "All checks passed!"},
+            {"command": "uv run --group dev mypy kanban_warden", "exit_code": 0, "output": "Success"},
         ],
         created_at=104.0,
     )
@@ -1607,7 +1607,7 @@ def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> No
             actor="hairou",
             allowed_repository="coderlaoma/hermes-kanban-warden",
             allowed_branch_prefix="warden/improve-",
-            verification_commands=["uv run pytest"],
+            verification_commands=["uv run --group dev pytest"],
             reason="Wrong level.",
             created_at=101.0,
         )
@@ -1641,12 +1641,12 @@ def _prepare_requested_human_review(store: WardenStateStore) -> dict[str, object
         actor="kanban-warden",
         command_results=[
             {
-                "command": "uv run pytest tests/test_board_events.py -q",
+                "command": "uv run --group dev pytest tests/test_board_events.py -q",
                 "exit_code": 0,
                 "output": "12 passed",
             },
-            {"command": "uv run ruff check .", "exit_code": 0, "output": "All checks passed!"},
-            {"command": "uv run mypy src", "exit_code": 0, "output": "Success"},
+            {"command": "uv run --group dev ruff check .", "exit_code": 0, "output": "All checks passed!"},
+            {"command": "uv run --group dev mypy kanban_warden", "exit_code": 0, "output": "Success"},
         ],
         created_at=104.0,
     )

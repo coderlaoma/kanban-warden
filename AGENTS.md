@@ -19,15 +19,15 @@ Use these names consistently:
 - Project/display name: `hermes-kanban-warden`
 - GitHub repository slug: `coderlaoma/hermes-kanban-warden` (`https://github.com/coderlaoma/hermes-kanban-warden`)
 - Python import/config namespace: `kanban_warden`
-- Python distribution / Hermes plugin entry point / CLI slug: `kanban-warden`
+- Hermes plugin slug: `kanban-warden`
 
-`kanban-warden` remains the current package/CLI/plugin technical slug for this documentation-only update. Do not rename `pyproject.toml` package metadata, `src/kanban_warden/plugin.yaml`, CLI commands, runtime log prefixes, database paths, or Python imports unless a future task explicitly scopes a breaking slug migration with aliases and compatibility notes. Historical repository slugs such as `coderlaoma/kanban-warden` may redirect here, but new documentation should point to `coderlaoma/hermes-kanban-warden`.
+`kanban-warden` remains the current plugin technical slug. Do not rename the root `plugin.yaml`, runtime log prefixes, database paths, config namespace, or Python imports unless a future task explicitly scopes a breaking slug migration with aliases and compatibility notes. Historical repository slugs such as `coderlaoma/kanban-warden` may redirect here, but new documentation should point to `coderlaoma/hermes-kanban-warden`.
 
 ## Current implementation scope
 
 Implemented in the current skeleton:
 
-- Hermes plugin registration through the `hermes_agent.plugins` entry point and directory-plugin metadata.
+- Hermes plugin registration through the repository root `plugin.yaml` and `__init__.py` directory-plugin entrypoint.
 - `register(ctx)` / `unregister(ctx)` hooks that install Kanban safety scanning and start/stop the optional supervisor when profile config enables it.
 - Non-blocking scanner hooks for durable Kanban coordination output, with redacted findings and warning text.
 - YAML-backed scanner rules and allowlisted redaction placeholders.
@@ -35,7 +35,7 @@ Implemented in the current skeleton:
 - A SQLite leader lock with lease, heartbeat, status, release, and contention-demo behavior.
 - `WardenSupervisor`, a daemon-thread plugin lifecycle loop that obtains the leader lock before each tick, tails board events, preserves root/child relationship metadata, and performs safe structured logging plus health sweeps.
 - A bounded notification outbox drainer with retry/backoff state that writes redacted `kanban-warden` evidence through the Kanban board DB so the native notifier/gateway/Feishu route can observe subscribed tasks.
-- `kanban-warden` CLI commands: `status`, `dry-run`, `run-once`, and `demo-lock`.
+- Debug CLI module commands: `status`, `dry-run`, `run-once`, and `demo-lock` via `python -m kanban_warden.cli`.
 - Unit tests for scanner behavior, plugin result transformation, config parsing, leader-lock contention, supervisor dry ticks, outbox delivery lifecycle, and CLI demo behavior.
 
 Not yet implemented as real operational behavior:
@@ -56,7 +56,7 @@ Gateway/entry subscriptions should track root Kanban tasks only. Decomposed chil
 
 Follow these principles for all changes:
 
-- Plugin-style integration: integrate through Hermes plugin hooks and packaging entry points instead of invasive Hermes core edits.
+- Plugin-style integration: integrate through Hermes plugin hooks and the directory-plugin contract instead of invasive Hermes core edits.
 - Low intrusion: the plugin should warn and guide agents without silently changing user data or blocking unrelated tool calls.
 - Supervisor is lifecycle-bound: the background loop is tied to Hermes plugin/profile lifecycle, not a separate Hermes cron job.
 - Leader lock: long-running watcher or supervisor behavior must ensure only one active warden instance acts on the same board at a time.
@@ -93,27 +93,28 @@ Before handing off:
 Current confirmed layout:
 
 - `README.md` — project overview, install notes, profile configuration example, supervisor scope, CLI usage, development commands, and security posture.
-- `pyproject.toml` — setuptools package metadata, Hermes plugin entry point, console script, dependencies, pytest/ruff/mypy configuration.
+- `plugin.yaml` — root Hermes directory-plugin metadata.
+- `__init__.py` — root Hermes directory-plugin entrypoint that delegates to `kanban_warden.register` / `unregister`.
+- `pyproject.toml` — development dependency group plus pytest/ruff/mypy configuration; it is not the runtime installation surface.
 - `LICENSE` — project license.
 - `AGENTS.md` — this repository guidance document.
-- `src/kanban_warden/__init__.py` — Hermes plugin hook registration, Kanban tool argument extraction, warning transformation, and optional supervisor startup.
-- `src/kanban_warden/warden.py` — secret scanner, YAML rule loading, redaction, and warning rendering.
-- `src/kanban_warden/config.py` — typed configuration model for supervisor, leader lock, loop, notification, auto-advance, and limits settings.
-- `src/kanban_warden/lock.py` — SQLite leader-lock implementation with lease and heartbeat semantics.
-- `src/kanban_warden/supervisor.py` — lifecycle-bound supervisor loop, leader-lock coordination, event collection, dry-run/status reporting, read-only health sweep, and demo lock contention helper.
-- `src/kanban_warden/board.py` — read-only board discovery, task_events tailing, relationship inference, and candidate health findings.
-- `src/kanban_warden/state.py` — SQLite persistent state for per-board cursors, idempotency keys, retry budgets, notification outbox lifecycle, and runtime metadata.
-- `src/kanban_warden/outbox.py` — bounded notification outbox drainer that writes Kanban-native evidence events/comments for existing subscribers.
-- `src/kanban_warden/cli.py` — debug CLI for status, dry-run/run-once ticks, and leader-lock demonstration.
-- `src/kanban_warden/rules.yaml` — packaged detection rules and allowlist values.
-- `src/kanban_warden/plugin.yaml` — directory-plugin metadata for Hermes.
-- `src/kanban_warden/py.typed` — marker for typed package consumers.
+- `kanban_warden/__init__.py` — Hermes plugin hook registration, Kanban tool argument extraction, warning transformation, and optional supervisor startup.
+- `kanban_warden/warden.py` — secret scanner, YAML rule loading, redaction, and warning rendering.
+- `kanban_warden/config.py` — typed configuration model for supervisor, leader lock, loop, notification, auto-advance, and limits settings.
+- `kanban_warden/lock.py` — SQLite leader-lock implementation with lease and heartbeat semantics.
+- `kanban_warden/supervisor.py` — lifecycle-bound supervisor loop, leader-lock coordination, event collection, dry-run/status reporting, read-only health sweep, and demo lock contention helper.
+- `kanban_warden/board.py` — read-only board discovery, task_events tailing, relationship inference, and candidate health findings.
+- `kanban_warden/state.py` — SQLite persistent state for per-board cursors, idempotency keys, retry budgets, notification outbox lifecycle, and runtime metadata.
+- `kanban_warden/outbox.py` — bounded notification outbox drainer that writes Kanban-native evidence events/comments for existing subscribers.
+- `kanban_warden/cli.py` — debug CLI for status, dry-run/run-once ticks, and leader-lock demonstration.
+- `kanban_warden/rules.yaml` — packaged detection rules and allowlist values.
+- `kanban_warden/py.typed` — marker for typed package consumers.
 - `tests/test_warden.py` — scanner, plugin-result transformation, config, leader-lock, supervisor, and CLI tests.
-- `src/kanban_warden.egg-info/` and `dist/` — generated packaging artifacts from prior builds. Avoid editing generated metadata directly unless the task explicitly concerns packaging artifacts.
+- `.venv/` and other tool outputs — generated local artifacts. Avoid editing or committing them.
 
 Currently absent or not documented as first-class project areas:
 
-- No `docs/` directory.
+- `docs/` currently contains loop-supervisor design notes.
 - `scripts/` contains disposable verification and operator check scripts; keep them secret-safe and runnable from the checkout.
 - No `Makefile` or `justfile`.
 - No direct platform notification transport backend or packaged state DB migration system yet.
@@ -123,11 +124,10 @@ Currently absent or not documented as first-class project areas:
 Commands documented by the repository:
 
 ```sh
-python -m pip install -e '.[dev]'
-ruff check .
-mypy src
-pytest
-python -m build
+uv sync --group dev
+uv run --group dev ruff check .
+uv run --group dev mypy kanban_warden
+uv run --group dev pytest
 ```
 
 Use these only in an appropriate Python environment. The development host may include a `.venv/`; do not assume it exists elsewhere or commit environment-specific files.
@@ -138,11 +138,11 @@ Safe lightweight checks for documentation-only edits in the current development 
 test -f AGENTS.md
 test ! -f AGENT.md
 test ! -f CLAUDE.md
-.venv/bin/python -m pytest
-.venv/bin/python -m ruff check .
+uv run --group dev pytest
+uv run --group dev ruff check .
 ```
 
-Run `.venv/bin/python -m mypy src` and `.venv/bin/python -m build` when changing typed Python code, packaging, or release metadata. If tooling is missing, report the missing command instead of inventing a substitute.
+Run `uv run --group dev mypy kanban_warden` when changing typed Python code, and verify the root `plugin.yaml` / `__init__.py` contract when changing release metadata. If tooling is missing, report the missing command instead of inventing a substitute.
 
 ## Safety rules
 
