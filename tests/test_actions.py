@@ -1338,6 +1338,57 @@ def test_notification_outbox_no_subscriber_retries_with_backoff_then_exhausts(
     )
 
 
+def test_notification_outbox_send_failure_retries(tmp_path: Path) -> None:
+    config = _config(
+        tmp_path,
+        dry_run=False,
+        delivery_max_attempts=2,
+        delivery_backoff_seconds=10.0,
+    )
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="blocked", created_at=1)
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values ('impl', 'feishu', 'chat-1', '', 'user-1', 'hairou-feishu', 2, 0)"
+    )
+    con.commit()
+    con.close()
+    _event(board, "impl", "blocked", {"reason": "review-required: inspect diff"}, 3)
+
+    sender = FakeSender(fail=True)
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert report["outbox_delivery"]["retrying"] >= 1
+    assert sender.sent
+    rows = sqlite3.connect(config.state_db_path or "").execute(
+        "select status, attempts, last_error, next_attempt_at from notification_outbox order by key"
+    ).fetchall()
+    assert rows
+    assert any(
+        row[0] == "retrying"
+        and row[1] == 1
+        and "synthetic send failure" in row[2]
+        and row[3] == 30.0
+        for row in rows
+    )
+
+
 def test_notification_outbox_delivered_rows_are_not_redelivered(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
@@ -1410,16 +1461,69 @@ def test_notification_outbox_dry_run_does_not_deliver(tmp_path: Path) -> None:
     con.close()
     _event(board, "impl", "blocked", {"reason": "review-required: check diff"}, 3)
 
-    report = WardenSupervisor(config, profile_name="tester").dry_run(now=20)
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).dry_run(now=20)
 
     assert report["outbox_delivery"]["dry_run"] is True
     assert report["outbox_delivery"]["processed"] == 0
+    assert sender.sent == []
     assert (
         sqlite3.connect(config.state_db_path or "")
         .execute("select count(*) from notification_outbox")
         .fetchone()[0]
         == 0
     )
+
+
+def test_notification_outbox_secret_like_message_exhausts_without_sending(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="done", created_at=1)
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values ('impl', 'feishu', 'chat-1', '', 'user-1', 'hairou-feishu', 2, 0)"
+    )
+    con.commit()
+    con.close()
+    state = WardenStateStore(config.state_db_path or "")
+    state.enqueue_notification(
+        "secret-row",
+        {
+            "kind": "notify",
+            "board_name": "default",
+            "task_id": "impl",
+            "reason": "manual test",
+            "message": "leaked password = fake-long-password-value",
+        },
+    )
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert report["outbox_delivery"]["exhausted"] >= 1
+    assert sender.sent == []
+    rows = sqlite3.connect(config.state_db_path or "").execute(
+        "select status, attempts, last_error from notification_outbox where key = 'secret-row'"
+    ).fetchall()
+    assert rows == [("exhausted", 1, "notification evidence contains secret-like text")]
     assert (
         sqlite3.connect(board)
         .execute("select count(*) from task_events where kind = 'commented'")
