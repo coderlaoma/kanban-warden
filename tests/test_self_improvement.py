@@ -1016,6 +1016,24 @@ def test_self_improvement_rollback_requires_deployment_record(tmp_path: Path) ->
         )
 
 
+def test_self_improvement_rollback_must_match_prepared_plan(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+
+    with pytest.raises(ValueError, match="prepared plan"):
+        SelfImprovementEngine(store).record_code_change_rollback(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            reason="Unexpected rollback command.",
+            target_profiles=["hermes-dev"],
+            restored_commit_sha="prev1234",
+            restored_plugin_version="0.3.9+prev1234",
+            rollback_commands=["rm -rf /opt/hermes"],
+            health_check_result={"status": "passed"},
+            created_at=111.0,
+        )
+
+
 def test_self_improvement_records_external_monitor_summary(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_deployed_code_change(store)

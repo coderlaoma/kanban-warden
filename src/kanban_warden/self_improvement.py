@@ -522,6 +522,9 @@ class SelfImprovementEngine:
         proposal = self._proposal_by_id(proposal_id)
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can record rollback")
+        plan = self._audit_payload(proposal_id, "deployment_plan_prepared")
+        if plan is None:
+            raise ValueError("deployment plan is required before rollback")
         if (
             self._audit_payload(proposal_id, "deployment_succeeded") is None
             and self._audit_payload(proposal_id, "deployment_failed") is None
@@ -533,6 +536,11 @@ class SelfImprovementEngine:
         normalized_rollback_commands = _string_list(rollback_commands)
         if not normalized_rollback_commands:
             raise ValueError("rollback commands are required")
+        if (
+            plan.get("target_profiles") != normalized_profiles
+            or plan.get("rollback_commands") != normalized_rollback_commands
+        ):
+            raise ValueError("rollback result must match the prepared plan")
         rollback = {
             "proposal_id": proposal_id,
             "reason": reason,
