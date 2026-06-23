@@ -550,6 +550,10 @@ class SelfImprovementEngine:
             or plan.get("rollback_commands") != normalized_rollback_commands
         ):
             raise ValueError("rollback result must match the prepared plan")
+        if not restored_commit_sha.strip():
+            raise ValueError("rollback restored commit SHA is required")
+        if not restored_plugin_version.strip():
+            raise ValueError("rollback restored plugin version is required")
         if not str(health_check_result.get("status", "")).strip():
             raise ValueError("rollback health check status is required")
         rollback = {

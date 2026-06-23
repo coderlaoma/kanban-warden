@@ -1081,6 +1081,35 @@ def test_self_improvement_rollback_requires_health_check_status(tmp_path: Path) 
         )
 
 
+@pytest.mark.parametrize(
+    ("restored_commit_sha", "restored_plugin_version"),
+    [
+        ("", "0.3.9+prev1234"),
+        ("prev1234", ""),
+    ],
+)
+def test_self_improvement_rollback_requires_restored_identity(
+    tmp_path: Path,
+    restored_commit_sha: str,
+    restored_plugin_version: str,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+
+    with pytest.raises(ValueError, match="restored"):
+        SelfImprovementEngine(store).record_code_change_rollback(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            reason="Post-deploy health check regressed.",
+            target_profiles=["hermes-dev"],
+            restored_commit_sha=restored_commit_sha,
+            restored_plugin_version=restored_plugin_version,
+            rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+            health_check_result={"status": "passed"},
+            created_at=111.0,
+        )
+
+
 def test_self_improvement_rollback_requires_deployment_record(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_requested_human_review(store)
