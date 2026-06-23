@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from kanban_warden.config import KanbanWardenConfig
+from kanban_warden.delivery import SendTarget, target_from_subscription
 from kanban_warden.state import WardenStateStore
 from kanban_warden.supervisor import WardenSupervisor
 
@@ -161,6 +162,24 @@ def _config(
             "loop": {"health_sweep_seconds": 0},
         }
     )
+
+
+def test_delivery_target_formats_thread_id() -> None:
+    target = target_from_subscription(
+        {"platform": "feishu", "chat_id": "chat-1", "thread_id": "thread-9"}
+    )
+
+    assert target == SendTarget(platform="feishu", chat_id="chat-1", thread_id="thread-9")
+    assert target.to_hermes_target() == "feishu:chat-1:thread-9"
+
+
+def test_delivery_target_formats_plain_chat() -> None:
+    target = target_from_subscription(
+        {"platform": "weixin", "chat_id": "chat-1", "thread_id": ""}
+    )
+
+    assert target == SendTarget(platform="weixin", chat_id="chat-1", thread_id="")
+    assert target.to_hermes_target() == "weixin:chat-1"
 
 
 def test_review_required_dry_run_plans_notification_and_reviewer_without_mutating_board(
