@@ -667,7 +667,11 @@ def test_self_improvement_publication_rejects_branch_mismatch(tmp_path: Path) ->
         )
 
 
-def test_self_improvement_publication_requires_pull_request_url(tmp_path: Path) -> None:
+@pytest.mark.parametrize("pull_request_url", ["", "   "])
+def test_self_improvement_publication_requires_pull_request_url(
+    tmp_path: Path,
+    pull_request_url: str,
+) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_requested_human_review(store)
     engine = SelfImprovementEngine(store)
@@ -685,7 +689,7 @@ def test_self_improvement_publication_requires_pull_request_url(tmp_path: Path) 
             actor="kanban-warden",
             branch_name=draft["patch"]["branch_name"],
             branch_url="https://github.com/coderlaoma/hermes-kanban-warden/tree/warden/improve",
-            pull_request_url="",
+            pull_request_url=pull_request_url,
             created_at=107.0,
         )
 

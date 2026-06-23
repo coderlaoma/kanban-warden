@@ -315,7 +315,7 @@ class SelfImprovementEngine:
             raise ValueError("publication branch name must match the prepared package")
         if not branch_url.strip():
             raise ValueError("publication requires a branch URL")
-        if not pull_request_url:
+        if not pull_request_url.strip():
             raise ValueError("publication requires a pull request URL")
         publication = {
             "proposal_id": proposal_id,
