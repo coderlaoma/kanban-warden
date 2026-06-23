@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from kanban_warden.config import KanbanWardenConfig
-from kanban_warden.delivery import SendTarget, target_from_subscription
+from kanban_warden.delivery import DeliveryResult, SendTarget, target_from_subscription
 from kanban_warden.state import WardenStateStore
 from kanban_warden.supervisor import WardenSupervisor
 
@@ -162,6 +163,18 @@ def _config(
             "loop": {"health_sweep_seconds": 0},
         }
     )
+
+
+@dataclass
+class FakeSender:
+    sent: list[tuple[str, str]] = field(default_factory=list)
+    fail: bool = False
+
+    def send(self, target: SendTarget, message: str) -> DeliveryResult:
+        self.sent.append((target.to_hermes_target(), message))
+        if self.fail:
+            return DeliveryResult(ok=False, error="synthetic send failure")
+        return DeliveryResult(ok=True)
 
 
 def test_delivery_target_formats_thread_id() -> None:
@@ -1209,7 +1222,7 @@ def test_notification_outbox_stale_in_progress_rows_are_reclaimed(tmp_path: Path
     ).fetchone() == ("delivered", 1, None, None)
 
 
-def test_notification_outbox_drain_delivers_to_native_subscriber_without_board_evidence(
+def test_notification_outbox_drain_delivers_to_origin_subscriber_without_board_evidence(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=False)
@@ -1240,9 +1253,14 @@ def test_notification_outbox_drain_delivers_to_native_subscriber_without_board_e
     con.close()
     _event(board, "impl", "completed", {"summary": "worker finished"}, 3)
 
-    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
 
     assert report["outbox_delivery"]["delivered"] >= 1
+    assert sender.sent
+    assert sender.sent[0][0] == "feishu:chat-1"
+    assert "[Kanban Warden]" in sender.sent[0][1]
+    assert "impl" in sender.sent[0][1]
     store_con = sqlite3.connect(config.state_db_path or "")
     outbox = store_con.execute(
         "select status, attempts, last_error from notification_outbox order by key"
