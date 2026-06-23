@@ -690,6 +690,29 @@ def test_self_improvement_publication_requires_pull_request_url(tmp_path: Path) 
         )
 
 
+def test_self_improvement_publication_requires_branch_url(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_requested_human_review(store)
+    engine = SelfImprovementEngine(store)
+    engine.record_human_review_decision(
+        proposal_id=draft["proposal_id"],
+        reviewer="lead",
+        decision="approved",
+        reason="Reviewed evidence and verification.",
+        created_at=106.0,
+    )
+
+    with pytest.raises(ValueError, match="branch URL"):
+        engine.record_code_change_publication(
+            proposal_id=draft["proposal_id"],
+            actor="kanban-warden",
+            branch_name=draft["patch"]["branch_name"],
+            branch_url="",
+            pull_request_url="https://github.com/coderlaoma/hermes-kanban-warden/pull/99",
+            created_at=107.0,
+        )
+
+
 def test_self_improvement_records_external_merge_result(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_requested_human_review(store)
