@@ -478,6 +478,8 @@ class SelfImprovementEngine:
         }
         if any(plan.get(field) != value for field, value in planned_fields.items()):
             raise ValueError("deployment result must match the prepared plan")
+        if not str(health_check_result.get("status", "")).strip():
+            raise ValueError("deployment health check status is required")
         deployment = {
             "proposal_id": proposal_id,
             "status": status,

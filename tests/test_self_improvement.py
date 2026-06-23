@@ -1002,6 +1002,27 @@ def test_self_improvement_deployment_must_match_prepared_plan(tmp_path: Path) ->
         )
 
 
+def test_self_improvement_deployment_requires_health_check_status(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployment_planned_code_change(store)
+
+    with pytest.raises(ValueError, match="health check"):
+        SelfImprovementEngine(store).record_code_change_deployment(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            target_profiles=["hermes-dev"],
+            commit_sha="abc1234",
+            plugin_version="0.4.0+abc1234",
+            config_changes={"policies": "unchanged"},
+            restart_commands=["systemctl reload hermes-kanban-warden"],
+            health_check_result={},
+            monitor_window="30m",
+            rollback_commands=["git revert abc1234", "systemctl reload hermes-kanban-warden"],
+            status="succeeded",
+            created_at=110.0,
+        )
+
+
 def test_self_improvement_records_external_rollback_result(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     draft = _prepare_deployed_code_change(store)
