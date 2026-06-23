@@ -561,6 +561,8 @@ class SelfImprovementEngine:
             and self._audit_payload(proposal_id, "deployment_failed") is None
         ):
             raise ValueError("deployment record is required before rollback")
+        if not reason.strip():
+            raise ValueError("rollback reason is required")
         normalized_profiles = _string_list(target_profiles)
         if not normalized_profiles:
             raise ValueError("rollback target profiles are required")
