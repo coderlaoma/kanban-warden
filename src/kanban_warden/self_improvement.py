@@ -448,8 +448,8 @@ class SelfImprovementEngine:
         proposal = self._proposal_by_id(proposal_id)
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can record deployment")
-        if self._audit_payload(proposal_id, "mr_created") is None:
-            raise ValueError("publication is required before deployment")
+        if self._audit_payload(proposal_id, "deployment_plan_prepared") is None:
+            raise ValueError("deployment plan is required before deployment")
         if status not in {"succeeded", "failed"}:
             raise ValueError("deployment status must be succeeded or failed")
         normalized_profiles = _string_list(target_profiles)
