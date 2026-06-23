@@ -1128,6 +1128,23 @@ def test_self_improvement_monitoring_requires_deployment_record(tmp_path: Path) 
         )
 
 
+def test_self_improvement_monitoring_must_match_prepared_plan(tmp_path: Path) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    draft = _prepare_deployed_code_change(store)
+
+    with pytest.raises(ValueError, match="prepared plan"):
+        SelfImprovementEngine(store).record_post_deploy_monitoring(
+            proposal_id=draft["proposal_id"],
+            actor="release-bot",
+            monitor_window="5m",
+            target_profiles=["hermes-dev"],
+            metrics={"gateway_error_count": 0},
+            regressions=[],
+            recommendation="continue_monitoring",
+            created_at=111.0,
+        )
+
+
 def test_self_improvement_rejects_non_code_change_approval(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     proposal = store.record_improvement_proposal(

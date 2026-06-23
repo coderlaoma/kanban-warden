@@ -589,6 +589,9 @@ class SelfImprovementEngine:
         proposal = self._proposal_by_id(proposal_id)
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can record monitoring")
+        plan = self._audit_payload(proposal_id, "deployment_plan_prepared")
+        if plan is None:
+            raise ValueError("deployment plan is required before monitoring")
         if (
             self._audit_payload(proposal_id, "deployment_succeeded") is None
             and self._audit_payload(proposal_id, "deployment_failed") is None
@@ -597,6 +600,11 @@ class SelfImprovementEngine:
         normalized_profiles = _string_list(target_profiles)
         if not normalized_profiles:
             raise ValueError("monitoring target profiles are required")
+        if (
+            plan.get("target_profiles") != normalized_profiles
+            or plan.get("monitor_window") != monitor_window
+        ):
+            raise ValueError("monitoring summary must match the prepared plan")
         summary = {
             "proposal_id": proposal_id,
             "monitor_window": monitor_window,
