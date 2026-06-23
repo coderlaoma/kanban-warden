@@ -641,6 +641,10 @@ class SelfImprovementEngine:
             or plan.get("monitor_window") != monitor_window
         ):
             raise ValueError("monitoring summary must match the prepared plan")
+        if not metrics:
+            raise ValueError("monitoring metrics are required")
+        if not recommendation.strip():
+            raise ValueError("monitoring recommendation is required")
         summary = {
             "proposal_id": proposal_id,
             "monitor_window": monitor_window,
