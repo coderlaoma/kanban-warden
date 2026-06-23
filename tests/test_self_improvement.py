@@ -125,6 +125,45 @@ def test_self_improvement_rejects_expanded_approval_scope(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.parametrize(
+    ("allowed_repository", "allowed_branch_prefix", "reason"),
+    [
+        ("", "warden/improve-", "Approved boundary."),
+        ("coderlaoma/hermes-kanban-warden", "", "Approved boundary."),
+        ("coderlaoma/hermes-kanban-warden", "warden/improve-", ""),
+    ],
+)
+def test_self_improvement_approval_requires_boundary_metadata(
+    tmp_path: Path,
+    allowed_repository: str,
+    allowed_branch_prefix: str,
+    reason: str,
+) -> None:
+    store = WardenStateStore(tmp_path / "state.db")
+    store.record_improvement_signal(
+        signal_type="policy_gap",
+        scope="detector.high_activity_low_progress",
+        severity="high",
+        supporting_trace_ids=["trace-101"],
+        supporting_outcome_ids=["outcome-101"],
+        summary="Need code detector.",
+        recommended_level="E3",
+        created_at=100.0,
+    )
+    draft = SelfImprovementEngine(store).create_code_change_drafts(created_at=101.0)[0]
+
+    with pytest.raises(ValueError, match="approval"):
+        SelfImprovementEngine(store).record_code_change_approval(
+            proposal_id=draft["proposal_id"],
+            actor="hairou",
+            allowed_repository=allowed_repository,
+            allowed_branch_prefix=allowed_branch_prefix,
+            verification_commands=draft["patch"]["verification_commands"],
+            reason=reason,
+            created_at=102.0,
+        )
+
+
 def test_self_improvement_prepares_approved_code_change_package(tmp_path: Path) -> None:
     store = WardenStateStore(tmp_path / "state.db")
     signal = store.record_improvement_signal(
