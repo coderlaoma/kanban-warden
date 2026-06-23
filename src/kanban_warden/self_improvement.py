@@ -396,8 +396,11 @@ class SelfImprovementEngine:
         proposal = self._proposal_by_id(proposal_id)
         if proposal["level"] != "E3" or proposal["proposal_type"] != "code_change":
             raise ValueError("only E3 code-change proposals can prepare deployment plans")
-        if self._audit_payload(proposal_id, "mr_merged") is None:
+        merge = self._audit_payload(proposal_id, "mr_merged")
+        if merge is None:
             raise ValueError("merge record is required before deployment plan")
+        if commit_sha != str(merge.get("merge_commit_sha", "")):
+            raise ValueError("deployment plan commit must match the merge commit")
         normalized_profiles = _string_list(target_profiles)
         if not normalized_profiles:
             raise ValueError("deployment plan target profiles are required")
