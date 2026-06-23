@@ -550,6 +550,8 @@ class SelfImprovementEngine:
             or plan.get("rollback_commands") != normalized_rollback_commands
         ):
             raise ValueError("rollback result must match the prepared plan")
+        if not str(health_check_result.get("status", "")).strip():
+            raise ValueError("rollback health check status is required")
         rollback = {
             "proposal_id": proposal_id,
             "reason": reason,
