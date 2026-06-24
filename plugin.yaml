@@ -1,5 +1,5 @@
 name: kanban-warden
-version: "0.7.0"
+version: "0.7.1"
 description: "Hermes Kanban safety plugin: warns when kanban comments/completions/blockers contain likely secrets, credentials, private keys, or connection strings."
 author: "Hairou"
 hooks:

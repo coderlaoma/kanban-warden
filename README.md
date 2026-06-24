@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.7.0`
+MVP version: `0.7.1`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -53,21 +53,28 @@ The plugin has three cooperating layers:
 
 ## Installation
 
-Install the plugin through Hermes' Git plugin manager:
+Install the plugin through Hermes' Git plugin manager in the same profile that
+will run the gateway. For the Hairou Feishu gateway profile:
 
 ```bash
-hermes plugins install coderlaoma/hermes-kanban-warden
+hermes --profile hairou-feishu plugins install coderlaoma/hermes-kanban-warden --enable
+hermes --profile hairou-feishu gateway restart
 ```
+
+For another profile, replace `hairou-feishu` with that profile name. If you run
+`hermes plugins install ...` without `--profile`, Hermes installs into the
+default Hermes home, and a profile-scoped gateway will not discover the plugin.
 
 Update an existing install after a new tag is published:
 
 ```bash
-hermes plugins update kanban-warden
+hermes --profile hairou-feishu plugins update kanban-warden
+hermes --profile hairou-feishu gateway restart
 ```
 
 Pinning to a specific release depends on the Hermes plugin manager version. If
 the local CLI does not support a version flag, update the cloned plugin checkout
-under the active Hermes home to tag `v0.7.0`.
+under the active Hermes home to tag `v0.7.1`.
 
 Development setup from a source checkout:
 
