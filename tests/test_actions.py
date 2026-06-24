@@ -1066,6 +1066,54 @@ def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: 
     assert report["state"]["notification_outbox_count"] >= 1
 
 
+def test_running_heartbeat_does_not_notify_subscribers(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(
+        con,
+        "impl",
+        title="Impl",
+        status="running",
+        assignee="worker",
+        created_at=1,
+    )
+    con.execute("update tasks set started_at = ? where id = ?", (2, "impl"))
+    con.commit()
+    con.close()
+    _event(board, "impl", "heartbeat", {}, 3)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=4)
+
+    assert not any(action["kind"] == "notify" for action in report["planned_actions"])
+    assert report["state"]["notification_outbox_count"] == 0
+
+
+def test_worker_failure_event_still_notifies_subscribers(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(
+        con,
+        "impl",
+        title="Impl",
+        status="failed",
+        assignee="worker",
+        created_at=1,
+    )
+    con.execute("update tasks set started_at = ? where id = ?", (2, "impl"))
+    con.commit()
+    con.close()
+    _event(board, "impl", "gave_up", {"reason": "worker failed"}, 3)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert any(action["kind"] == "notify" for action in report["planned_actions"])
+    assert report["state"]["notification_outbox_count"] >= 1
+
+
 def test_review_approve_with_descriptive_needs_changes_text_does_not_create_fix_card(
     tmp_path: Path,
 ) -> None:

@@ -463,9 +463,9 @@ class KanbanActionEngine:
     def _should_notify_event(self, kind: str, status: str, reason: str, outcome: str) -> bool:
         if not self.config.notifications.enabled:
             return False
-        if kind in {"created", "claimed", "spawned", "blocked", "completed", "done", "gave_up"}:
+        if kind in {"blocked", "completed", "done", "gave_up"}:
             return True
-        if status in {"running", "blocked", "done", "completed"}:
+        if status in {"blocked", "done", "completed"}:
             return True
         if "review-required" in reason or outcome in {"approve", "needs-changes"}:
             return True
