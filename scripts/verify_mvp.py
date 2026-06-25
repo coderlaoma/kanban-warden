@@ -175,9 +175,10 @@ def main() -> int:
         dry_config = KanbanWardenConfig.from_mapping(base)
         dry_report = WardenSupervisor(dry_config, profile_name="verify-dry").dry_run(now=20)
         dry_kinds = {action["kind"] for action in dry_report["planned_actions"]}
-        assert {"notify", "create_reviewer", "create_implementer_followup", "comment", "unblock", "retry"}.issubset(
+        assert {"create_reviewer", "create_implementer_followup", "comment", "unblock", "retry"}.issubset(
             dry_kinds
         ), dry_kinds
+        assert "notify" not in dry_kinds
         assert all(
             result["applied"] is False and result["note"] == "dry-run"
             for result in dry_report["action_results"]
@@ -220,6 +221,7 @@ def main() -> int:
             "review-needs-changes:default:review_impl:impl",
             "review-needs-changes-unblock:default:review_impl:impl",
         }.issubset(outbox_keys)
+        assert not any(key.startswith("event:") and ":notify:" in key for key in outbox_keys)
         # A second collection may see events emitted by the first mutation pass
         # (for example created/escalated comments), but it must not duplicate
         # the reviewer card or regress the source task status.

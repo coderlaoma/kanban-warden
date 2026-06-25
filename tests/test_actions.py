@@ -201,7 +201,7 @@ def test_delivery_target_formats_plain_chat() -> None:
     assert target.to_hermes_target() == "weixin:chat-1"
 
 
-def test_review_required_dry_run_plans_notification_and_reviewer_without_mutating_board(
+def test_review_required_dry_run_plans_reviewer_without_warden_notification(
     tmp_path: Path,
 ) -> None:
     config = _config(tmp_path, dry_run=True)
@@ -218,7 +218,7 @@ def test_review_required_dry_run_plans_notification_and_reviewer_without_mutatin
     report = WardenSupervisor(config, profile_name="tester").dry_run(now=20)
 
     kinds = [action["kind"] for action in report["planned_actions"]]
-    assert "notify" in kinds
+    assert "notify" not in kinds
     assert "create_reviewer" in kinds
     assert all(
         result["applied"] is False and result["note"] == "dry-run"
@@ -1190,7 +1190,7 @@ def test_blocker_done_promotes_blocked_downstream_and_root_all_children_done_fin
     )
 
 
-def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: Path) -> None:
+def test_key_comment_markers_do_not_create_warden_notifications(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
@@ -1212,8 +1212,11 @@ def test_key_comment_markers_are_notificationized_from_comment_events(tmp_path: 
 
     report = WardenSupervisor(config, profile_name="tester").collect(now=20)
 
-    assert any(action["kind"] == "notify" for action in report["planned_actions"])
-    assert report["state"]["notification_outbox_count"] >= 1
+    assert not any(action["kind"] == "notify" for action in report["planned_actions"])
+    rows = sqlite3.connect(config.state_db_path or "").execute(
+        "select payload_json from notification_outbox"
+    ).fetchall()
+    assert not rows
 
 
 def test_running_heartbeat_does_not_notify_subscribers(tmp_path: Path) -> None:
@@ -1240,7 +1243,7 @@ def test_running_heartbeat_does_not_notify_subscribers(tmp_path: Path) -> None:
     assert report["state"]["notification_outbox_count"] == 0
 
 
-def test_worker_failure_event_still_notifies_subscribers(tmp_path: Path) -> None:
+def test_worker_failure_event_does_not_duplicate_native_notification(tmp_path: Path) -> None:
     config = _config(tmp_path, dry_run=False)
     board = Path(config.hermes_home or "") / "kanban.db"
     _init_real_schema_board(board)
@@ -1260,8 +1263,11 @@ def test_worker_failure_event_still_notifies_subscribers(tmp_path: Path) -> None
 
     report = WardenSupervisor(config, profile_name="tester").collect(now=20)
 
-    assert any(action["kind"] == "notify" for action in report["planned_actions"])
-    assert report["state"]["notification_outbox_count"] >= 1
+    assert not any(action["kind"] == "notify" for action in report["planned_actions"])
+    rows = sqlite3.connect(config.state_db_path or "").execute(
+        "select payload_json from notification_outbox"
+    ).fetchall()
+    assert not any('"kind": "notify"' in row[0] for row in rows)
 
 
 def test_review_approve_with_descriptive_needs_changes_text_does_not_create_fix_card(
@@ -1450,7 +1456,18 @@ def test_notification_outbox_drain_delivers_to_origin_subscriber_without_board_e
     )
     con.commit()
     con.close()
-    _event(board, "impl", "completed", {"summary": "worker finished"}, 3)
+    store = WardenStateStore(config.state_db_path or "")
+    store.enqueue_notification(
+        key="manual-origin",
+        payload={
+            "board_name": "default",
+            "task_id": "impl",
+            "kind": "notify",
+            "reason": "manual test",
+            "message": "worker finished",
+            "channels": ["origin"],
+        },
+    )
 
     sender = FakeSender()
     report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
@@ -1564,7 +1581,18 @@ def test_notification_outbox_no_subscriber_retries_with_backoff_then_exhausts(
     _insert_real_task(con, "impl", title="Impl", status="done", created_at=1)
     con.commit()
     con.close()
-    _event(board, "impl", "completed", {"summary": "worker finished"}, 3)
+    store = WardenStateStore(config.state_db_path or "")
+    store.enqueue_notification(
+        key="manual-origin",
+        payload={
+            "board_name": "default",
+            "task_id": "impl",
+            "kind": "notify",
+            "reason": "manual test",
+            "message": "worker finished",
+            "channels": ["origin"],
+        },
+    )
     supervisor = WardenSupervisor(config, profile_name="tester")
 
     first = supervisor.collect(now=20)
@@ -1622,7 +1650,17 @@ def test_notification_outbox_send_failure_retries(tmp_path: Path) -> None:
     )
     con.commit()
     con.close()
-    _event(board, "impl", "blocked", {"reason": "review-required: inspect diff"}, 3)
+    WardenStateStore(config.state_db_path or "").enqueue_notification(
+        key="manual-origin",
+        payload={
+            "board_name": "default",
+            "task_id": "impl",
+            "kind": "notify",
+            "reason": "manual test",
+            "message": "manual retry path",
+            "channels": ["origin"],
+        },
+    )
 
     sender = FakeSender(fail=True)
     report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
@@ -1668,7 +1706,17 @@ def test_notification_outbox_delivered_rows_are_not_redelivered(tmp_path: Path) 
     )
     con.commit()
     con.close()
-    _event(board, "impl", "completed", {"summary": "worker finished"}, 3)
+    WardenStateStore(config.state_db_path or "").enqueue_notification(
+        key="manual-origin",
+        payload={
+            "board_name": "default",
+            "task_id": "impl",
+            "kind": "notify",
+            "reason": "manual test",
+            "message": "worker finished",
+            "channels": ["origin"],
+        },
+    )
     supervisor = WardenSupervisor(config, profile_name="tester")
 
     supervisor.collect(now=20)

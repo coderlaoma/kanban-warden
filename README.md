@@ -153,8 +153,8 @@ Key settings:
 
 - `kanban_warden.enabled`: starts the background supervisor at plugin registration.
 - `kanban_warden.boards`: `"*"` discovers all visible boards; a list pins specific board names.
-- `notifications.enabled`: queues warden decisions to the durable outbox.
-- `notifications.channels`: `origin` routes delivery to existing `kanban_notify_subs` subscribers through Hermes `send_message`.
+- `notifications.enabled`: enables native subscription maintenance such as root/stuck-task subscription propagation. Warden does not duplicate normal Kanban terminal-event notifications into its own outbox.
+- `notifications.channels`: reserved for explicitly enqueued notification rows; routine blocked/completed/gave-up/crashed messages are expected to come from Hermes' native Kanban notifier.
 - `auto_advance.enabled`: turns on the state-machine actions. Current write-like actions are recorded as gateway-required outbox proposals unless a dedicated delivery path handles them.
 - `auto_advance.dry_run`: when true, plans actions without applying them. The normal enabled profile value is `false`; use the CLI `dry-run` command for previews.
 - `blocked_remediation.enabled`: when true, explicitly blocked tasks are classified. Agent-actionable blocks queue a `create_blocked_remediation` gateway proposal; human-needed blocks only get a source-task comment and stay blocked.
@@ -169,7 +169,7 @@ Advanced settings are available but intentionally omitted from the default examp
 - `leader_lock.*`: duplicate-supervisor protection. Defaults are suitable for normal gateway profiles.
 - `loop.*`: supervisor polling and health sweep cadence.
 - `state_db_path`, `board_db_path`, `hermes_home`, `log_level`: path and logging overrides for unusual deployments.
-- `notifications.delivery_*`: Hermes send delivery controls for environments that intentionally send warden notifications to origin subscribers.
+- `notifications.delivery_*`: Hermes send delivery controls for environments that intentionally enqueue explicit warden notifications to origin subscribers.
 - `task_filter.*`: active/terminal task filtering for large boards.
 - `cleanup.*`: optional board/state cleanup maintenance.
 
@@ -190,19 +190,19 @@ uv run --group dev python -m kanban_warden.cli demo-lock
 
 `run-once` runs one collection pass using the supplied config. It may mutate Kanban boards only if both `auto_advance.enabled: true` and `auto_advance.dry_run: false` are set.
 
-When `notifications.delivery_enabled: true` and `auto_advance.dry_run: false`, `run-once` also drains one bounded notification outbox batch after planning/applying actions. Delivery means resolving the target task's existing `kanban_notify_subs` rows and sending a short, secret-scanned message through Hermes `send_message`.
+When `notifications.delivery_enabled: true` and `auto_advance.dry_run: false`, `run-once` also drains one bounded notification outbox batch after planning/applying actions. Normal blocked/completed/gave-up/crashed task messages are not enqueued by Warden; delivery is for explicitly queued warden notification rows only.
 
 
 ## Root-only subscription policy and decomposed task propagation
 
 The gateway/entry side should subscribe only to root Kanban tasks. A root task is the top-level card that has no parent in `task_links` and may own one or more decomposed child implementation, review, or documentation cards.
 
-Do not manually subscribe every decomposed child task as the normal operating model. Child-task events are intentionally propagated through the Kanban event stream and the `hermes-kanban-warden`/Kanban notification plugin path:
+Do not manually subscribe every decomposed child task as the normal operating model. Hermes' native Kanban notifier delivers terminal task events. Warden only helps when a stuck child/root subscription is missing:
 
 - `BoardEvent` summaries include relationship metadata, including parents, children, `root_task_id`, `review_required`, and comment count.
-- The supervisor tails child events, preserves per-board cursors, and feeds the notification/action state machine from those events.
-- Notification decisions are idempotent and queued in the warden state DB outbox when notifications are enabled.
-- When delivery is enabled, queued decisions are sent to subscribed target tasks through Hermes `send_message`, so normal root subscriptions continue to be the gateway-facing route.
+- The supervisor tails child events, preserves per-board cursors, and feeds the action state machine from those events.
+- Warden does not duplicate native terminal-event messages into its own outbox, keeping gateway conversation context smaller.
+- Explicitly queued warden notifications can still be delivered through Hermes `send_message`, but this is not the routine blocked-task path.
 - Health sweeps detect root/child coordination problems such as a root task not being closed after all children are done, or a child that cannot proceed because an upstream dependency is blocked/failed.
 - When a blocked/gave-up/worker-failure child or dependency deadlock is detected, the fallback `ensure_subscription` action copies an existing root subscription to the stuck child (and ensures the root has the same subscription) using `insert or ignore`. This keeps normal entry creation root-only while allowing the native notifier to route the stuck child back to the user during incidents.
 
@@ -260,7 +260,7 @@ Expected healthy signs:
 - `leader_lock.enabled` is `true` unless intentionally disabled for a one-shot test.
 - `leader_lock.active` is true after a running supervisor or explicit `run-once` has acquired the lease.
 - `state` includes board cursors/runtime metadata after dry-run or normal ticks.
-- `state.notification_outbox_by_status` shows queued/delivered/retrying/exhausted counts when notification decisions exist.
+- `state.notification_outbox_by_status` shows queued/delivered/retrying/exhausted counts when explicit warden notification rows or gateway-required proposals exist.
 - `dry_run.status.policies.auto_advance.dry_run` remains true unless an operator intentionally enables board mutations.
 
 ### Hermes send delivery
@@ -280,7 +280,7 @@ kanban_warden:
     delivery_lease_seconds: 300
 ```
 
-The drainer does not use platform credentials and does not print subscriber identifiers. It requires the target task to have at least one row in `kanban_notify_subs`; otherwise the outbox row is retried with backoff and eventually marked `exhausted`. Each subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability.
+The drainer does not use platform credentials and does not print subscriber identifiers. It requires the target task to have at least one row in `kanban_notify_subs`; otherwise the outbox row is retried with backoff and eventually marked `exhausted`. Each subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability. This path is for explicit warden notifications, not for duplicating normal native Kanban terminal-event notifications.
 
 Safe hairou verification queries:
 
@@ -345,9 +345,9 @@ The script creates a disposable Kanban database and verifies:
 
 - event collection and persistent cursors;
 - relationship inference from `task_links`;
-- dry-run planning for notify, reviewer creation, comments, unblocks, and retry;
+- dry-run planning for reviewer creation, comments, unblocks, retry, and subscription maintenance;
 - real-schema reviewer/comment/unblock mutations when dry-run is disabled;
-- durable notification outbox entries and Hermes send delivery through fake subscribers;
+- durable explicit notification outbox entries and Hermes send delivery through fake subscribers;
 - idempotency on repeated collection; and
 - active leader lock status.
 
@@ -372,9 +372,9 @@ uv run --group dev mypy kanban_warden
 
 ## Notification reliability boundary
 
-The MVP drains notification decisions by sending concise messages to tasks that already have `kanban_notify_subs` subscribers. The plugin does not add direct Feishu, WeChat, or other platform credentials; it delegates transport to Hermes `send_message`.
+The MVP can drain explicitly queued notification rows by sending concise messages to tasks that already have `kanban_notify_subs` subscribers. The plugin does not add direct Feishu, WeChat, or other platform credentials; it delegates transport to Hermes `send_message`.
 
-Known operational boundary: Feishu, WeChat/iLink, or other gateway rate limits can still cause send failures. Warden records notification intent and retries failed sends from its own outbox; final user-visible delivery must be validated against the real gateway behavior in the target deployment.
+Known operational boundary: Feishu, WeChat/iLink, or other gateway rate limits can still cause send failures. For explicit notification rows, Warden records notification intent and retries failed sends from its own outbox; normal blocked-task delivery remains the responsibility of Hermes' native Kanban notifier.
 
 ## Troubleshooting
 

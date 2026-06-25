@@ -8,6 +8,7 @@ small Kanban state transitions through SQLite when auto-advance is enabled.
 from __future__ import annotations
 
 import re
+import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -110,15 +111,6 @@ class KanbanActionEngine:
                         payload=finding,
                     )
                 )
-                actions.append(
-                    self._notify(
-                        board_name,
-                        task_id,
-                        f"health:{board_name}:{task_id}:{kind}:notify",
-                        f"health finding: {kind}",
-                        payload=finding,
-                    )
-                )
                 recovery_key = (board_name, task_id, "stale-running")
                 if recovery_key in planned_recoveries:
                     continue
@@ -146,15 +138,6 @@ class KanbanActionEngine:
                         task_id,
                         f"health:{board_name}:{task_id}:{kind}:ensure-subscription",
                         f"ensure root/stuck-task subscriptions for health finding: {kind}",
-                        payload=finding,
-                    )
-                )
-                actions.append(
-                    self._notify(
-                        board_name,
-                        task_id,
-                        f"health:{board_name}:{task_id}:{kind}:notify",
-                        f"health finding: {kind}",
                         payload=finding,
                     )
                 )
@@ -224,17 +207,6 @@ class KanbanActionEngine:
                     task_id,
                     f"{event_key}:ensure-subscription:{_slug(kind, status, reason, outcome)}",
                     f"ensure root/stuck-task subscriptions for kanban event {kind} status={status or 'unknown'}",
-                    payload=event.summary(),
-                )
-            )
-
-        if self._should_notify_event(kind, status, reason, outcome):
-            actions.append(
-                self._notify(
-                    event.board_name,
-                    task_id,
-                    f"{event_key}:notify:{_slug(kind, status, reason, outcome)}",
-                    f"kanban event {kind} status={status or 'unknown'}",
                     payload=event.summary(),
                 )
             )
@@ -540,19 +512,11 @@ class KanbanActionEngine:
             return False
         return kind in {"blocked", "gave_up"} or _is_worker_failure(kind, status, reason, outcome)
 
-    def _should_notify_event(self, kind: str, status: str, reason: str, outcome: str) -> bool:
-        if not self.config.notifications.enabled:
-            return False
-        if kind in {"blocked", "completed", "done", "gave_up"}:
-            return True
-        if status in {"blocked", "done", "completed"}:
-            return True
-        if "review-required" in reason or outcome in {"approve", "needs-changes"}:
-            return True
-        return _is_worker_failure(kind, status, reason, outcome)
-
     def _apply_one(self, db_path: Path, action: PlannedAction) -> str:
         if action.kind == "ensure_subscription":
+            task_id = action.target_task_id or action.task_id
+            if task_id and _has_native_subscription(db_path, task_id):
+                return "subscription-exists"
             self._queue_gateway_proposal(action)
             return _BOARD_WRITE_DISABLED
         if action.kind == "notify":
@@ -825,6 +789,21 @@ def _retryable_no_effect(action: PlannedAction, note: str) -> bool:
     }
 
 
+def _has_native_subscription(db_path: str | Path, task_id: str) -> bool:
+    with sqlite3.connect(db_path) as con:
+        if (
+            con.execute(
+                "select 1 from sqlite_master where type = 'table' and name = ?",
+                ("kanban_notify_subs",),
+            ).fetchone()
+            is None
+        ):
+            return False
+        row = con.execute(
+            "select 1 from kanban_notify_subs where task_id = ? limit 1",
+            (task_id,),
+        ).fetchone()
+        return row is not None
 
 
 def _text(value: Any) -> str:
