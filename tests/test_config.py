@@ -10,6 +10,9 @@ def test_default_config_runs_in_active_non_dry_run_mode() -> None:
 
     assert config.auto_advance.enabled is True
     assert config.auto_advance.dry_run is False
+    assert config.blocked_remediation.enabled is False
+    assert config.blocked_remediation.max_per_tick == 3
+    assert config.blocked_remediation.assignee is None
     assert config.reviewer_assignee is None
 
 
@@ -23,6 +26,7 @@ def test_example_config_keeps_only_common_operator_settings() -> None:
     assert warden["boards"] == "*"
     assert warden["notifications"] == {"enabled": True, "channels": ["origin"]}
     assert warden["auto_advance"] == {"enabled": True, "dry_run": False}
+    assert warden["blocked_remediation"] == {"enabled": True, "max_per_tick": 3}
     assert warden["reviewer_assignee"] is None
     assert set(warden["limits"]) == {
         "max_retries",
@@ -35,6 +39,23 @@ def test_example_config_keeps_only_common_operator_settings() -> None:
     assert "cleanup" not in warden
     assert "review_required" not in raw
     assert "stale_claims" not in raw
+
+
+def test_blocked_remediation_config_parses_minimal_settings() -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {
+            "kanban_warden": {
+                "blocked_remediation": {
+                    "enabled": "true",
+                    "max_per_tick": 2,
+                }
+            }
+        }
+    )
+
+    assert config.blocked_remediation.enabled is True
+    assert config.blocked_remediation.max_per_tick == 2
+    assert config.blocked_remediation.assignee is None
 
 
 def test_reviewer_assignee_is_top_level_and_legacy_path_is_still_read() -> None:

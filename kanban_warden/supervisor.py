@@ -406,6 +406,7 @@ def _is_traceworthy_action(action: PlannedAction) -> bool:
     return action.kind in {
         "create_reviewer",
         "create_implementer_followup",
+        "create_blocked_remediation",
         "unblock",
         "promote",
         "finalize",
@@ -419,6 +420,8 @@ def _loop_state_for_action(action: PlannedAction) -> str:
         return "waiting_for_review"
     if action.kind == "create_implementer_followup":
         return "waiting_for_worker"
+    if action.kind == "create_blocked_remediation":
+        return "waiting_for_orchestrator"
     if action.kind in {"retry", "escalate"}:
         return "no_progress"
     return "action_planned" if action.dry_run else "verifying_action"
@@ -429,6 +432,8 @@ def _matched_policy_for_action(action: PlannedAction) -> str:
         return "review_required"
     if action.kind == "create_implementer_followup":
         return "review_needs_changes"
+    if action.kind == "create_blocked_remediation":
+        return "blocked_remediation"
     if action.kind in {"retry", "escalate"}:
         return "bounded_recovery"
     return action.reason.replace(" ", "_")[:80] or action.kind
@@ -445,6 +450,8 @@ def _verification_contract_for_action(action: PlannedAction) -> dict[str, Any]:
         return {"success": "reviewer_card_exists", "target_task_id": action.target_task_id}
     if action.kind == "create_implementer_followup":
         return {"success": "implementer_followup_exists"}
+    if action.kind == "create_blocked_remediation":
+        return {"success": "blocked_remediation_task_exists"}
     if action.kind == "unblock":
         return {"success": "source_card_unblocked"}
     if action.kind == "finalize":

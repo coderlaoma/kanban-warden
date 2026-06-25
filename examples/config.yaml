@@ -25,6 +25,13 @@ kanban_warden:
     enabled: true
     dry_run: false
 
+  # When a task is explicitly blocked, classify the blocker. Agent-
+  # actionable blocks create a gateway-required remediation proposal; human-
+  # needed blocks only receive a source-task comment.
+  blocked_remediation:
+    enabled: true
+    max_per_tick: 3
+
   # Optional. Leave null unless this Hermes environment has a known reviewer
   # assignee. When null, reviewer routing is left to Kanban/Hermes defaults.
   reviewer_assignee: null

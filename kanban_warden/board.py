@@ -28,6 +28,7 @@ class TaskRelationship:
     root_task_id: str | None = None
     review_required: bool = False
     comments_count: int = 0
+    open_remediation_task_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -43,6 +44,10 @@ class BoardEvent:
     created_at: float | None
     run_id: int | None
     task_status: str | None
+    task_title: str | None
+    task_assignee: str | None
+    task_created_by: str | None
+    task_idempotency_key: str | None
     relationship: TaskRelationship
 
     def idempotency_key(self) -> str:
@@ -57,6 +62,10 @@ class BoardEvent:
             "created_at": self.created_at,
             "run_id": self.run_id,
             "task_status": self.task_status,
+            "task_title": self.task_title,
+            "task_assignee": self.task_assignee,
+            "task_created_by": self.task_created_by,
+            "task_idempotency_key": self.task_idempotency_key,
             "relationship": self.relationship.to_dict(),
         }
 
@@ -342,6 +351,7 @@ def build_relationship(con: sqlite3.Connection, task_id: str | None) -> TaskRela
         )
     if _task_title_or_status_contains_review(con, task_id):
         review_required = True
+    open_remediation_task_ids = _open_blocked_remediations(con, task_id)
     return TaskRelationship(
         task_id=task_id,
         parents=parents,
@@ -349,6 +359,7 @@ def build_relationship(con: sqlite3.Connection, task_id: str | None) -> TaskRela
         root_task_id=root,
         review_required=review_required,
         comments_count=comments_count,
+        open_remediation_task_ids=open_remediation_task_ids,
     )
 
 
@@ -368,7 +379,20 @@ def _read_events(
     with managed_connection(db_path) as con:
         con.row_factory = sqlite3.Row
         has_tasks = _has_table(con, "tasks")
-        status_select = ", t.status as task_status" if has_tasks else ", null as task_status"
+        if has_tasks:
+            task_columns = _table_columns(con, "tasks")
+            status_select = ", t.status as task_status"
+            status_select += _optional_task_select(task_columns, "title", "task_title")
+            status_select += _optional_task_select(task_columns, "assignee", "task_assignee")
+            status_select += _optional_task_select(task_columns, "created_by", "task_created_by")
+            status_select += _optional_task_select(
+                task_columns, "idempotency_key", "task_idempotency_key"
+            )
+        else:
+            status_select = (
+                ", null as task_status, null as task_title, null as task_assignee,"
+                " null as task_created_by, null as task_idempotency_key"
+            )
         status_join = " left join tasks t on t.id = e.task_id" if has_tasks else ""
         rows = _safe_select(
             con,
@@ -416,6 +440,10 @@ def _event_from_row(
         created_at=_row_float(row, "created_at"),
         run_id=_row_int_optional(row, "run_id"),
         task_status=task_status,
+        task_title=_row_text(row, "task_title") or None,
+        task_assignee=_row_text(row, "task_assignee") or None,
+        task_created_by=_row_text(row, "task_created_by") or None,
+        task_idempotency_key=_row_text(row, "task_idempotency_key") or None,
         relationship=relationship,
     )
 
@@ -444,6 +472,19 @@ def _has_table(con: sqlite3.Connection, table: str) -> bool:
         "select 1 from sqlite_master where type = 'table' and name = ?", (table,)
     ).fetchone()
     return row is not None
+
+
+def _table_columns(con: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {str(row[1]) for row in con.execute(f"pragma table_info({table})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _optional_task_select(columns: set[str], column: str, alias: str) -> str:
+    if column in columns:
+        return f", t.{column} as {alias}"
+    return f", null as {alias}"
 
 
 def _safe_select(
@@ -480,6 +521,27 @@ def _task_title_or_status_contains_review(con: sqlite3.Connection, task_id: str)
         return False
     haystack = " ".join(_row_text(rows[0], key).lower() for key in (0, 1))
     return "review" in haystack or "approve" in haystack
+
+
+def _open_blocked_remediations(con: sqlite3.Connection, source_task_id: str) -> list[str]:
+    if not _has_table(con, "tasks"):
+        return []
+    columns = _table_columns(con, "tasks")
+    if "idempotency_key" not in columns:
+        return []
+    terminal = ("done", "completed", "cancelled", "archived", "failed", "gave_up")
+    placeholders = ",".join("?" for _ in terminal)
+    rows = _safe_select(
+        con,
+        f"""
+        select id from tasks
+        where idempotency_key like ?
+          and coalesce(status, '') not in ({placeholders})
+        order by created_at, id
+        """,
+        (f"blocked-remediation:%:{source_task_id}:%", *terminal),
+    )
+    return [_row_text(row, 0) for row in rows]
 
 
 def _last_event_at(con: sqlite3.Connection, task_id: str, kind: str) -> float | None:

@@ -132,6 +132,7 @@ def _config(
     *,
     dry_run: bool = True,
     max_retries: int = 2,
+    blocked_remediation: bool = False,
     delivery_enabled: bool = True,
     delivery_max_attempts: int = 3,
     delivery_backoff_seconds: float = 30.0,
@@ -155,6 +156,10 @@ def _config(
             "auto_advance": {
                 "enabled": True,
                 "dry_run": dry_run,
+            },
+            "blocked_remediation": {
+                "enabled": blocked_remediation,
+                "max_per_tick": 3,
             },
             "limits": {
                 "max_retries": max_retries,
@@ -288,6 +293,151 @@ def test_review_required_apply_queues_reviewer_without_mutating_board(tmp_path: 
     assert not any(
         result["applied"] and result["kind"] == "create_reviewer"
         for result in second["action_results"]
+    )
+
+
+def test_agent_actionable_blocked_event_queues_blocked_remediation_task(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False, blocked_remediation=True)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(
+        con,
+        "impl",
+        title="Implement dispatcher retry",
+        status="blocked",
+        assignee="hairou",
+        created_at=1,
+    )
+    con.commit()
+    con.close()
+    reason = "goal-mode worker exhausted its turn budget without completing the task"
+    _event(board, "impl", "blocked", {"reason": reason}, 2)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    actions = [
+        action
+        for action in report["planned_actions"]
+        if action["kind"] == "create_blocked_remediation"
+    ]
+    assert len(actions) == 1
+    action = actions[0]
+    assert action["idempotency_key"] == "blocked-remediation:default:impl:1"
+    assert action["task_id"] == "impl"
+    assert action["payload"]["source_task_id"] == "impl"
+    assert action["payload"]["blocked_event_id"] == 1
+    assert action["payload"]["classification"] == "agent-actionable"
+    assert action["payload"]["title"] == "Resolve blocked task impl: Implement dispatcher retry"
+    assert reason in action["payload"]["body"]
+    assert "kanban orchestrator" in action["payload"]["body"]
+    assert "parent_task_id" not in action["payload"]
+    assert any(
+        result["kind"] == "create_blocked_remediation"
+        and result["note"] == "board-write-disabled"
+        for result in report["action_results"]
+    )
+    con = sqlite3.connect(board)
+    assert con.execute("select count(*) from tasks where id like 'remediate_%'").fetchone()[0] == 0
+
+
+def test_human_needed_blocked_event_comments_without_remediation(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False, blocked_remediation=True)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="blocked", created_at=1)
+    con.commit()
+    con.close()
+    _event(board, "impl", "blocked", {"reason": "need user decision: choose A or B"}, 2)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert not any(
+        action["kind"] == "create_blocked_remediation" for action in report["planned_actions"]
+    )
+    assert any(
+        action["kind"] == "comment"
+        and action["task_id"] == "impl"
+        and "human-needed" in action["message"]
+        for action in report["planned_actions"]
+    )
+
+
+def test_open_blocked_remediation_for_source_suppresses_duplicate(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False, blocked_remediation=True)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    _insert_real_task(con, "impl", title="Impl", status="blocked", created_at=1)
+    con.execute(
+        """
+        insert into tasks(id, title, status, assignee, created_by, created_at, workspace_kind, idempotency_key)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "remediate_impl_1",
+            "Resolve blocked task impl: Impl",
+            "todo",
+            "dispatcher",
+            "kanban-warden",
+            2,
+            "scratch",
+            "blocked-remediation:default:impl:1",
+        ),
+    )
+    con.commit()
+    con.close()
+    _event(board, "impl", "blocked", {"reason": "worker exhausted its turn budget"}, 3)
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert not any(
+        action["kind"] == "create_blocked_remediation" for action in report["planned_actions"]
+    )
+
+
+def test_self_generated_blocked_remediation_is_not_remediated_again(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False, blocked_remediation=True)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.execute(
+        """
+        insert into tasks(id, title, status, assignee, created_by, created_at, workspace_kind, idempotency_key)
+        values (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "remediate_impl_2",
+            "Resolve blocked task impl: Impl",
+            "blocked",
+            "dispatcher",
+            "kanban-warden",
+            1,
+            "scratch",
+            "blocked-remediation:default:impl:2",
+        ),
+    )
+    con.commit()
+    con.close()
+    _event(
+        board,
+        "remediate_impl_2",
+        "blocked",
+        {"reason": "worker exhausted its turn budget"},
+        2,
+    )
+
+    report = WardenSupervisor(config, profile_name="tester").collect(now=20)
+
+    assert not any(
+        action["kind"] == "create_blocked_remediation" for action in report["planned_actions"]
+    )
+    assert not any(
+        action["kind"] == "comment" and "blocked-remediation" in action["idempotency_key"]
+        for action in report["planned_actions"]
     )
 
 

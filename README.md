@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.7.2`
+MVP version: `0.8.0`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -74,7 +74,7 @@ hermes --profile hairou-feishu gateway restart
 
 Pinning to a specific release depends on the Hermes plugin manager version. If
 the local CLI does not support a version flag, update the cloned plugin checkout
-under the active Hermes home to tag `v0.7.2`.
+under the active Hermes home to tag `v0.8.0`.
 
 Development setup from a source checkout:
 
@@ -131,6 +131,13 @@ kanban_warden:
     enabled: true
     dry_run: false
 
+  # Optional autonomous unblock helper. Agent-actionable kanban_block events
+  # create gateway-required remediation proposals. Human-needed blockers only
+  # receive a source-task comment.
+  blocked_remediation:
+    enabled: true
+    max_per_tick: 3
+
   # Optional. Leave null unless this Hermes environment has a known reviewer
   # assignee. When null, reviewer routing is left to Kanban/Hermes defaults.
   reviewer_assignee: null
@@ -150,6 +157,8 @@ Key settings:
 - `notifications.channels`: `origin` routes delivery to existing `kanban_notify_subs` subscribers through Hermes `send_message`.
 - `auto_advance.enabled`: turns on the state-machine actions. Current write-like actions are recorded as gateway-required outbox proposals unless a dedicated delivery path handles them.
 - `auto_advance.dry_run`: when true, plans actions without applying them. The normal enabled profile value is `false`; use the CLI `dry-run` command for previews.
+- `blocked_remediation.enabled`: when true, explicitly blocked tasks are classified. Agent-actionable blocks queue a `create_blocked_remediation` gateway proposal; human-needed blocks only get a source-task comment and stay blocked.
+- `blocked_remediation.max_per_tick`: caps newly proposed blocked-remediation tasks in one supervisor pass.
 - `reviewer_assignee`: optional fixed reviewer assignee. Leave `null` for portable configs so Kanban/Hermes can route reviews using its own defaults.
 - `limits.max_retries`: retry budget before escalation.
 - `limits.task_timeout_seconds`: long-running task timeout threshold.
