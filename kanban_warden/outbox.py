@@ -250,6 +250,7 @@ def _title_for_action(kind: str, reason: str) -> str:
     titles = {
         "create_reviewer": "Review required",
         "create_implementer_followup": "Changes requested",
+        "create_blocked_remediation": "Blocked remediation",
         "retry": "Task retry planned",
         "escalate": "Retry exhausted",
         "promote": "Task can be promoted",

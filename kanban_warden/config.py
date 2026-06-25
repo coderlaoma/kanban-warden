@@ -44,6 +44,13 @@ class AutoAdvanceConfig:
 
 
 @dataclass(frozen=True)
+class BlockedRemediationConfig:
+    enabled: bool = False
+    max_per_tick: int = 3
+    assignee: str | None = None
+
+
+@dataclass(frozen=True)
 class LimitsConfig:
     max_retries: int = 2
     task_timeout_seconds: int = 14_400
@@ -97,6 +104,9 @@ class KanbanWardenConfig:
     loop: LoopConfig = field(default_factory=LoopConfig)
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
     auto_advance: AutoAdvanceConfig = field(default_factory=AutoAdvanceConfig)
+    blocked_remediation: BlockedRemediationConfig = field(
+        default_factory=BlockedRemediationConfig
+    )
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     task_filter: TaskFilterConfig = field(default_factory=TaskFilterConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
@@ -122,6 +132,9 @@ class KanbanWardenConfig:
                 **_pick(section.get("notifications"), NotificationConfig)
             ),
             auto_advance=AutoAdvanceConfig(**_pick(section.get("auto_advance"), AutoAdvanceConfig)),
+            blocked_remediation=BlockedRemediationConfig(
+                **_pick(section.get("blocked_remediation"), BlockedRemediationConfig)
+            ),
             limits=LimitsConfig(**_pick(section.get("limits"), LimitsConfig)),
             task_filter=TaskFilterConfig(**_pick(section.get("task_filter"), TaskFilterConfig)),
             cleanup=CleanupConfig(**_pick(section.get("cleanup"), CleanupConfig)),

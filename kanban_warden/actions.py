@@ -21,6 +21,7 @@ ActionKind = Literal[
     "notify",
     "create_reviewer",
     "create_implementer_followup",
+    "create_blocked_remediation",
     "comment",
     "unblock",
     "promote",
@@ -79,8 +80,15 @@ class KanbanActionEngine:
 
     def plan_for_events(self, events: list[BoardEvent]) -> list[PlannedAction]:
         actions: list[PlannedAction] = []
+        blocked_remediations = 0
         for event in events:
-            actions.extend(self._plan_event(event))
+            for action in self._plan_event(event):
+                if action.kind == "create_blocked_remediation":
+                    limit = max(0, int(self.config.blocked_remediation.max_per_tick))
+                    if blocked_remediations >= limit:
+                        continue
+                    blocked_remediations += 1
+                actions.append(action)
         return actions
 
     def plan_for_health(self, findings: list[dict[str, Any]]) -> list[PlannedAction]:
@@ -231,6 +239,8 @@ class KanbanActionEngine:
                 )
             )
 
+        actions.extend(self._plan_blocked_remediation(event, reason))
+
         if _is_review_required(event):
             actions.append(
                 PlannedAction(
@@ -329,6 +339,68 @@ class KanbanActionEngine:
             )
         return actions
 
+    def _plan_blocked_remediation(self, event: BoardEvent, reason: str) -> list[PlannedAction]:
+        if not self.config.blocked_remediation.enabled:
+            return []
+        if event.kind != "blocked" or event.task_status != "blocked" or not event.task_id:
+            return []
+        if _is_review_required(event) or _is_self_generated_blocked_remediation(event):
+            return []
+        if event.relationship.open_remediation_task_ids:
+            return [
+                self._comment(
+                    event.board_name,
+                    event.task_id,
+                    f"blocked-remediation-existing:{event.board_name}:{event.task_id}:{event.event_id}",
+                    "[warden-blocked-remediation skipped] Existing open remediation task already covers this source task: "
+                    + ", ".join(event.relationship.open_remediation_task_ids),
+                    reason="blocked remediation already open",
+                )
+            ]
+        source_task_id = event.task_id
+        classification = _blocked_remediation_classification(reason, event.payload or {})
+        if classification == "human-needed":
+            return [
+                self._comment(
+                    event.board_name,
+                    source_task_id,
+                    f"blocked-remediation-human-needed:{event.board_name}:{source_task_id}:{event.event_id}",
+                    "[warden-blocked-remediation human-needed] This block appears to require a human decision, credential, permission, account, cost, production change, merge, or release approval. Warden will not create an autonomous remediation task.",
+                    reason="blocked remediation human-needed",
+                )
+            ]
+        if classification != "agent-actionable":
+            return []
+        title = _blocked_remediation_title(source_task_id, event.task_title)
+        body = _blocked_remediation_body(event, reason)
+        payload = _without_none(
+            {
+                "classification": classification,
+                "source_task_id": source_task_id,
+                "blocked_event_id": event.event_id,
+                "source_event": event.summary(),
+                "title": title,
+                "body": body,
+                "assignee": self.config.blocked_remediation.assignee,
+                "idempotency_key": f"blocked-remediation:{event.board_name}:{source_task_id}:{event.event_id}",
+                "created_by": "kanban-warden",
+            }
+        )
+        return [
+            PlannedAction(
+                kind="create_blocked_remediation",
+                board_name=event.board_name,
+                task_id=source_task_id,
+                target_task_id=None,
+                idempotency_key=payload["idempotency_key"],
+                reason="agent-actionable blocked task",
+                message=f"Create/dispatch blocked remediation for {source_task_id}",
+                payload=payload,
+                max_attempts=self.config.limits.max_retries,
+                dry_run=self.config.auto_advance.dry_run,
+            )
+        ]
+
     def _bounded_recovery(
         self,
         *,
@@ -401,13 +473,21 @@ class KanbanActionEngine:
             dry_run=self.config.auto_advance.dry_run,
         )
 
-    def _comment(self, board_name: str, task_id: str, key: str, message: str) -> PlannedAction:
+    def _comment(
+        self,
+        board_name: str,
+        task_id: str,
+        key: str,
+        message: str,
+        *,
+        reason: str = "review follow-up",
+    ) -> PlannedAction:
         return PlannedAction(
             "comment",
             board_name,
             task_id,
             key,
-            "review follow-up",
+            reason,
             message,
             task_id,
             {},
@@ -482,6 +562,9 @@ class KanbanActionEngine:
             self._queue_gateway_proposal(action)
             return _BOARD_WRITE_DISABLED
         if action.kind == "create_implementer_followup":
+            self._queue_gateway_proposal(action)
+            return _BOARD_WRITE_DISABLED
+        if action.kind == "create_blocked_remediation":
             self._queue_gateway_proposal(action)
             return _BOARD_WRITE_DISABLED
         if action.kind == "comment":
@@ -611,6 +694,119 @@ def _is_worker_failure(kind: str, status: str, reason: str, outcome: str) -> boo
         token in text
         for token in ("crash", "protocol violation", "gave_up", "gave up", "timed_out", "timed out")
     )
+
+
+def _blocked_remediation_classification(reason: str, payload: dict[str, Any]) -> str | None:
+    text = _generated_followup_text(payload)
+    haystack = " ".join([reason, text]).lower()
+    if not haystack.strip():
+        return None
+    if _requires_human(haystack):
+        return "human-needed"
+    if _is_agent_actionable_block(haystack):
+        return "agent-actionable"
+    return None
+
+
+def _requires_human(text: str) -> bool:
+    human_patterns = [
+        r"\bneed(?:s|ed)? user\b",
+        r"\bask(?:ing)? user\b",
+        r"\bwaiting for (?:human|user|operator)\b",
+        r"\bhuman[- ]needed\b",
+        r"\buser decision\b",
+        r"\bchoose\b",
+        r"\bapproval\b",
+        r"\bapprove\b",
+        r"\bcredential\b",
+        r"\bpermission\b",
+        r"\baccount\b",
+        r"\blogin\b",
+        r"\bpassword\b",
+        r"\bsecret\b",
+        r"\btoken\b",
+        r"\bapi key\b",
+        r"\bcost\b",
+        r"\bfee\b",
+        r"\bpayment\b",
+        r"\bproduction\b",
+        r"\bprod\b",
+        r"\bmerge approval\b",
+        r"\brelease approval\b",
+        r"\bdeploy approval\b",
+        r"用户.*(?:决策|确认|授权|审批|账号|密码|费用|发布|合并|生产)",
+        r"(?:需要|等待).*(?:人工|人类|用户).*(?:处理|判断|决策|确认|授权|审批)",
+    ]
+    return any(re.search(pattern, text) for pattern in human_patterns)
+
+
+def _is_agent_actionable_block(text: str) -> bool:
+    agent_patterns = [
+        r"\bworker\b",
+        r"\bagent\b",
+        r"\borchestrator\b",
+        r"\bplanner\b",
+        r"\bdispatch(?:er)?\b",
+        r"\bturn budget\b",
+        r"\bmax turns\b",
+        r"\bgoal[- ]mode\b",
+        r"\btimed? out\b",
+        r"\btimeout\b",
+        r"\bgave[_ -]?up\b",
+        r"\bcrash\b",
+        r"\bprotocol violation\b",
+        r"\bno progress\b",
+        r"\bstuck\b",
+        r"\bblocked\b",
+        r"\bfail(?:ed|ure)?\b",
+        r"推进不下去",
+        r"卡住",
+    ]
+    return any(re.search(pattern, text) for pattern in agent_patterns)
+
+
+def _is_self_generated_blocked_remediation(event: BoardEvent) -> bool:
+    task_id = event.task_id or ""
+    title = (event.task_title or "").lower()
+    created_by = (event.task_created_by or "").lower()
+    idempotency_key = event.task_idempotency_key or ""
+    if created_by == "kanban-warden":
+        return True
+    if task_id.startswith("remediate_"):
+        return True
+    if idempotency_key.startswith("blocked-remediation:"):
+        return True
+    return title.startswith("resolve blocked task ")
+
+
+def _blocked_remediation_title(source_task_id: str, source_title: str | None) -> str:
+    source_label = (source_title or "").strip() or source_task_id
+    return f"Resolve blocked task {source_task_id}: {source_label}"[:180]
+
+
+def _blocked_remediation_body(event: BoardEvent, reason: str) -> str:
+    source_title = event.task_title or event.task_id or ""
+    lines = [
+        "You are the kanban orchestrator for an autonomous blocked-task remediation.",
+        "",
+        f"Source board: {event.board_name}",
+        f"Source task: {event.task_id}",
+        f"Source title: {source_title}",
+        f"Blocked event: {event.event_id}",
+    ]
+    if reason:
+        lines.append(f"Blocked reason: {reason}")
+    lines.extend(
+        [
+            "",
+            "Read the source task, comments, run history, linked tasks, and available workspace evidence. Advance the work by commenting with findings, unblocking when safe, splitting into smaller tasks, or reassigning through the normal Kanban workflow.",
+            "",
+            "Ask the user only when progress truly requires a decision, missing credential, account or permission, cost approval, production change, merge approval, release approval, or conflicting acceptance criteria.",
+            "",
+            "Do not make this remediation task a child of the blocked source task; dependency on the blocked card can prevent the remediation from becoming runnable.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _is_warden_notification_evidence(payload: dict[str, Any]) -> bool:
