@@ -33,6 +33,8 @@ class NotificationConfig:
     delivery_max_attempts: int = 3
     delivery_backoff_seconds: float = 60.0
     delivery_lease_seconds: float = 300.0
+    home_fallback_enabled: bool = False
+    home_fallback_platforms: list[str] = field(default_factory=list)
     evidence_events: bool = True
     evidence_comments: bool = False
 
@@ -231,6 +233,7 @@ def _pick(value: Any, model: type[Any]) -> dict[str, Any]:
             "once",
             "dry_run",
             "delivery_enabled",
+            "home_fallback_enabled",
             "evidence_events",
             "evidence_comments",
             "ignore_terminal_tasks",

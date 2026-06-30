@@ -17,6 +17,8 @@ class SendTarget:
     thread_id: str = ""
 
     def to_hermes_target(self) -> str:
+        if not self.chat_id:
+            return self.platform
         if self.thread_id:
             return f"{self.platform}:{self.chat_id}:{self.thread_id}"
         return f"{self.platform}:{self.chat_id}"

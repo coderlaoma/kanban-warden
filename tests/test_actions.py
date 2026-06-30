@@ -201,6 +201,39 @@ def test_delivery_target_formats_plain_chat() -> None:
     assert target.to_hermes_target() == "weixin:chat-1"
 
 
+def test_delivery_target_formats_home_platform() -> None:
+    target = SendTarget(platform="feishu", chat_id="")
+
+    assert target.to_hermes_target() == "feishu"
+
+
+def test_notification_home_fallback_config_defaults_off(tmp_path: Path) -> None:
+    config = _config(tmp_path, dry_run=False)
+
+    assert config.notifications.home_fallback_enabled is False
+    assert config.notifications.home_fallback_platforms == []
+
+
+def test_notification_home_fallback_config_parses_platforms(tmp_path: Path) -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {
+            "enabled": True,
+            "hermes_home": str(tmp_path / "home" / ".hermes"),
+            "state_db_path": str(tmp_path / "state.db"),
+            "notifications": {
+                "enabled": True,
+                "channels": ["origin"],
+                "delivery_enabled": True,
+                "home_fallback_enabled": True,
+                "home_fallback_platforms": ["feishu", "weixin"],
+            },
+        }
+    )
+
+    assert config.notifications.home_fallback_enabled is True
+    assert config.notifications.home_fallback_platforms == ["feishu", "weixin"]
+
+
 def test_review_required_dry_run_plans_reviewer_without_warden_notification(
     tmp_path: Path,
 ) -> None:
@@ -1362,7 +1395,7 @@ def test_long_completed_summary_sends_tail_only_to_native_subscriber(tmp_path: P
     )
     con.commit()
     con.close()
-    native_prefix = "p" * 160
+    native_prefix = "p" * 200
     tail = "tail detail that Hermes native completed notification would omit"
     _event(board, "impl", "completed", {"summary": native_prefix + tail}, 3)
 
@@ -1385,6 +1418,49 @@ def test_long_completed_summary_sends_tail_only_to_native_subscriber(tmp_path: P
     assert "Task: impl" in message
     assert tail in message
     assert native_prefix not in message
+
+
+def test_completed_summary_tail_starts_after_native_two_hundred_char_prefix(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path, dry_run=False)
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="done", assignee="worker", created_at=1)
+    con.execute(
+        "insert into kanban_notify_subs(task_id, platform, chat_id, thread_id, user_id, notifier_profile, created_at, last_event_id) values (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("impl", "feishu", "chat-1", "", "user-1", "hairou-feishu", 2, 0),
+    )
+    con.commit()
+    con.close()
+    native_prefix = "p" * 160
+    visible_before_tail = "q" * 40
+    tail = "tail after native two hundred character prefix"
+    _event(board, "impl", "completed", {"summary": native_prefix + visible_before_tail + tail}, 3)
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert report["outbox_delivery"]["delivered"] == 1
+    message = sender.sent[0][1]
+    assert tail in message
+    assert visible_before_tail not in message
 
 
 def test_long_completed_summary_uses_root_subscription_when_child_has_no_subscriber(
@@ -1418,7 +1494,7 @@ def test_long_completed_summary_uses_root_subscription_when_child_has_no_subscri
     )
     con.commit()
     con.close()
-    native_prefix = "p" * 160
+    native_prefix = "p" * 200
     tail = "child completion tail for the root subscriber"
     _event(board, "child", "completed", {"summary": native_prefix + tail}, 4)
 
@@ -1795,6 +1871,73 @@ def test_notification_outbox_no_subscriber_retries_with_backoff_then_exhausts(
         ]
         == 0
     )
+
+
+def test_notification_outbox_home_fallback_sends_when_no_subscriber(tmp_path: Path) -> None:
+    config = KanbanWardenConfig.from_mapping(
+        {
+            "enabled": True,
+            "hermes_home": str(tmp_path / "home" / ".hermes"),
+            "state_db_path": str(tmp_path / "state.db"),
+            "leader_lock": {"enabled": False},
+            "notifications": {
+                "enabled": True,
+                "channels": ["origin"],
+                "delivery_enabled": True,
+                "home_fallback_enabled": True,
+                "home_fallback_platforms": ["feishu"],
+            },
+            "auto_advance": {
+                "enabled": True,
+                "dry_run": False,
+            },
+            "loop": {"health_sweep_seconds": 0},
+        }
+    )
+    board = Path(config.hermes_home or "") / "kanban.db"
+    _init_real_schema_board(board)
+    con = sqlite3.connect(board)
+    con.executescript(
+        """
+        create table kanban_notify_subs (
+          task_id text not null,
+          platform text not null,
+          chat_id text not null,
+          thread_id text not null default '',
+          user_id text,
+          notifier_profile text,
+          created_at integer not null,
+          last_event_id integer not null default 0,
+          primary key (task_id, platform, chat_id, thread_id)
+        );
+        """
+    )
+    _insert_real_task(con, "impl", title="Impl", status="done", created_at=1)
+    con.commit()
+    con.close()
+    store = WardenStateStore(config.state_db_path or "")
+    store.enqueue_notification(
+        key="manual-origin-fallback",
+        payload={
+            "board_name": "default",
+            "task_id": "impl",
+            "kind": "notify",
+            "reason": "manual test",
+            "message": "worker finished",
+            "channels": ["origin"],
+        },
+    )
+
+    sender = FakeSender()
+    report = WardenSupervisor(config, profile_name="tester", message_sender=sender).collect(now=20)
+
+    assert report["outbox_delivery"]["delivered"] >= 1
+    assert sender.sent == [("feishu", sender.sent[0][1])]
+    assert "Task: impl" in sender.sent[0][1]
+    assert sqlite3.connect(config.state_db_path or "").execute(
+        "select status, attempts, last_error from notification_outbox where key = ?",
+        ("manual-origin-fallback",),
+    ).fetchone() == ("delivered", 1, None)
 
 
 def test_notification_outbox_send_failure_retries(tmp_path: Path) -> None:

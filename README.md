@@ -2,7 +2,7 @@
 
 `hermes-kanban-warden` is an MVP Hermes Agent plugin for Kanban boards. It watches Kanban task events, keeps persistent cursors, detects review/stale/failure situations, queues notification decisions, and can optionally apply small auto-advance state transitions after you have inspected `dry-run` output.
 
-MVP version: `0.8.3`
+MVP version: `0.8.4`
 
 GitHub: https://github.com/coderlaoma/hermes-kanban-warden
 
@@ -74,7 +74,7 @@ hermes --profile hairou-feishu gateway restart
 
 Pinning to a specific release depends on the Hermes plugin manager version. If
 the local CLI does not support a version flag, update the cloned plugin checkout
-under the active Hermes home to tag `v0.8.3`.
+under the active Hermes home to tag `v0.8.4`.
 
 Development setup from a source checkout:
 
@@ -124,6 +124,12 @@ kanban_warden:
     enabled: true
     channels:
       - origin
+    # Optional escape hatch for profiles whose Kanban subscription table is
+    # temporarily empty. When enabled, explicit warden notifications fall back
+    # to the configured platform home channel only after subscriber lookup
+    # fails. Keep disabled for normal subscription-driven operation.
+    home_fallback_enabled: false
+    home_fallback_platforms: []
 
   # Normal operating mode. Most actions are gateway-required proposals in the
   # outbox; use the CLI dry-run command when you need a read-only preview.
@@ -155,6 +161,8 @@ Key settings:
 - `kanban_warden.boards`: `"*"` discovers all visible boards; a list pins specific board names.
 - `notifications.enabled`: enables native subscription maintenance such as root/stuck-task subscription propagation. Warden does not duplicate normal Kanban terminal-event notifications into its own outbox, except for explicit tail continuations when native blocked reasons or completed summaries exceed the configured safe prefix.
 - `notifications.channels`: reserved for explicitly enqueued notification rows; routine blocked/completed/gave-up/crashed messages are expected to come from Hermes' native Kanban notifier.
+- `notifications.home_fallback_enabled`: when true, explicit warden notification rows with `origin` delivery may fall back to configured platform home channels if the affected task/root has no `kanban_notify_subs` subscriber. This is an operational escape hatch for profile misconfiguration or subscription gaps, not the normal delivery path.
+- `notifications.home_fallback_platforms`: bare Hermes platform targets to use for the fallback, for example `["feishu"]`.
 - `auto_advance.enabled`: turns on the state-machine actions. Current write-like actions are recorded as gateway-required outbox proposals unless a dedicated delivery path handles them.
 - `auto_advance.dry_run`: when true, plans actions without applying them. The normal enabled profile value is `false`; use the CLI `dry-run` command for previews.
 - `blocked_remediation.enabled`: when true, explicitly blocked tasks are classified. Agent-actionable blocks queue a `create_blocked_remediation` gateway proposal; human-needed blocks only get a source-task comment and stay blocked.
@@ -278,9 +286,11 @@ kanban_warden:
     delivery_max_attempts: 3
     delivery_backoff_seconds: 60
     delivery_lease_seconds: 300
+    home_fallback_enabled: false
+    home_fallback_platforms: []
 ```
 
-The drainer does not use platform credentials and does not print subscriber identifiers. It first looks for subscribers on the target task, then falls back to root or parent subscribers carried by the source event relationship. If no subscriber is found, the outbox row is retried with backoff and eventually marked `exhausted`. Each subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability. This path is for explicit warden notifications and tail continuations, not for duplicating normal native Kanban terminal-event notifications.
+The drainer does not use platform credentials and does not print subscriber identifiers. It first looks for subscribers on the target task, then falls back to root or parent subscribers carried by the source event relationship. If no subscriber is found and `home_fallback_enabled` is false, the outbox row is retried with backoff and eventually marked `exhausted`. If `home_fallback_enabled` is true, Warden sends the explicit notification to each configured bare platform target, such as `feishu`, through Hermes' platform home channel. Each real subscriber row is converted to a Hermes target such as `feishu:<chat_id>` or `weixin:<chat_id>:<thread_id>`, then delivered through the Hermes `send_message` capability. This path is for explicit warden notifications and tail continuations, not for duplicating normal native Kanban terminal-event notifications.
 
 Safe hairou verification queries:
 
@@ -372,7 +382,7 @@ uv run --group dev mypy kanban_warden
 
 ## Notification reliability boundary
 
-The MVP can drain explicitly queued notification rows by sending concise messages to tasks that already have `kanban_notify_subs` subscribers. The plugin does not add direct Feishu, WeChat, or other platform credentials; it delegates transport to Hermes `send_message`.
+The MVP can drain explicitly queued notification rows by sending concise messages to tasks that already have `kanban_notify_subs` subscribers. A config-gated home-channel fallback is available for subscription gaps. The plugin does not add direct Feishu, WeChat, or other platform credentials; it delegates transport to Hermes `send_message`.
 
 Known operational boundary: Feishu, WeChat/iLink, or other gateway rate limits can still cause send failures. For explicit notification rows, Warden records notification intent and retries failed sends from its own outbox; normal blocked-task delivery remains the responsibility of Hermes' native Kanban notifier.
 

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import KanbanWardenConfig
-from .delivery import HermesMessageSender, MessageSender, target_from_subscription
+from .delivery import HermesMessageSender, MessageSender, SendTarget, target_from_subscription
 from .state import WardenStateStore
 from .warden import default_scanner
 
@@ -141,15 +141,38 @@ class NotificationOutboxDrainer:
                     if subscribers:
                         break
         if not subscribers:
+            subscribers = self._home_fallback_subscribers()
+        if not subscribers:
             raise _RetryableDeliveryError("no native kanban subscriber for target task")
         message = self._delivery_message(row, payload, board_name=board_name, task_id=task_id)
         _assert_secret_safe(message)
         for subscriber in subscribers:
-            target = target_from_subscription(subscriber)
+            target = _target_from_delivery_row(subscriber)
             result = self.message_sender.send(target, message)
             if not result.ok:
                 raise _RetryableDeliveryError(result.error or "message send failed")
         return True
+
+    def _home_fallback_subscribers(self) -> list[dict[str, Any]]:
+        if not self.config.notifications.home_fallback_enabled:
+            return []
+        subscribers: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for platform in self.config.notifications.home_fallback_platforms:
+            platform_text = _text(platform).strip().lower()
+            if not platform_text or platform_text in seen:
+                continue
+            seen.add(platform_text)
+            subscribers.append(
+                {
+                    "platform": platform_text,
+                    "chat_id": "",
+                    "thread_id": "",
+                    "user_id": "",
+                    "notifier_profile": "home-fallback",
+                }
+            )
+        return subscribers
 
     def _delivery_message(
         self,
@@ -313,6 +336,15 @@ def _fallback_subscription_task_ids(action_payload: dict[str, Any]) -> list[str]
         seen.add(candidate)
         unique.append(candidate)
     return unique
+
+
+def _target_from_delivery_row(row: Mapping[str, Any]) -> SendTarget:
+    if _text(row.get("notifier_profile")) == "home-fallback":
+        platform = _text(row.get("platform")).strip().lower()
+        if not platform:
+            raise ValueError("missing home fallback platform")
+        return SendTarget(platform=platform, chat_id="")
+    return target_from_subscription(row)
 
 
 def _title_for_action(kind: str, reason: str) -> str:
